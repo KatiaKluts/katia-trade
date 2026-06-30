@@ -42,7 +42,7 @@ function Icon({ name, size = 18, style, className }) {
   );
 }
 
-const FINNHUB_KEY = "d0s6prhr01qhup3kfivgd0s6prhr01qhup3kfj0";
+const FINNHUB_KEY = "d91rtg9r01qsj27nvmc0d91rtg9r01qsj27nvmcg";
 
 // Bump this when the seed list changes to re-import into existing installs.
 const SEED_VERSION = "2026-06-25-katia-v2";
