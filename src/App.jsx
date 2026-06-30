@@ -42,7 +42,7 @@ function Icon({ name, size = 18, style, className }) {
   );
 }
 
-const FINNHUB_KEY = "d91rtg9r01qsj27nvmc0d91rtg9r01qsj27nvmcg";
+const FINNHUB_KEY = "d0s6prhr01qhup3kfivgd0s6prhr01qhup3kfj0";
 
 // Bump this when the seed list changes to re-import into existing installs.
 const SEED_VERSION = "2026-06-25-katia-v2";
@@ -381,6 +381,7 @@ async function fetchQuote(ticker) {
 }
 
 async function fetch30DayRange(ticker) {
+  // 1) tenta o histórico de 30 dias (endpoint candle)
   try {
     const to   = Math.floor(Date.now() / 1000);
     const from = to - 30 * 86400;
@@ -388,13 +389,18 @@ async function fetch30DayRange(ticker) {
       `https://finnhub.io/api/v1/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_KEY}`
     );
     const d = await r.json();
-    if (d.s !== "ok" || !d.h?.length) return null;
-    return {
-      min30: Math.min(...d.l),
-      max30: Math.max(...d.h),
-      fetchedAt: Date.now(),
-    };
-  } catch { return null; }
+    if (d.s === "ok" && d.h?.length) {
+      return { min30: Math.min(...d.l), max30: Math.max(...d.h), fetchedAt: Date.now() };
+    }
+  } catch { /* segue para o fallback */ }
+  // 2) fallback (plano grátis): usa a máxima/mínima do dia da cotação atual
+  try {
+    const q = await fetchQuote(ticker);
+    if (q && q.h && q.l) {
+      return { min30: q.l, max30: q.h, fetchedAt: Date.now(), approx: true };
+    }
+  } catch { /* nada */ }
+  return null;
 }
 
 async function fetchNews(ticker) {
@@ -623,7 +629,7 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("katia_patrimony_history") || "[]"); } catch { return []; }
   });
   const [showTxForm, setShowTxForm] = useState(false);
-  const [txForm, setTxForm] = useState({ ticker: "", type: "COMPRA", qty: "", price: "", date: new Date().toISOString().slice(0, 10), fees: "" });
+  const [txForm, setTxForm] = useState({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" });
   const [notifPerm, setNotifPerm] = useState(
     "Notification" in window ? Notification.permission : "unsupported"
   );
@@ -667,11 +673,13 @@ export default function App() {
   const qtyOf = (s) => Math.round((Number(s.qty) || 0) * 10000) / 10000;
   const activeBase   = stocks.filter(s => !s.archived && qtyOf(s) > 0);
   const watchBase    = stocks.filter(s => !s.archived && qtyOf(s) <= 0);
+  const archivedBase = stocks.filter(s => s.archived);
 
 
   // Listas para EXIBIÇÃO nas tabelas (aplicam a busca)
   const activeStocks   = activeBase.filter(matchesSearch);
   const watchStocks    = watchBase.filter(matchesSearch);
+  const archivedStocks = archivedBase.filter(matchesSearch);
 
   // Setores GICS oficiais (11) — usados para ações
   const SECTORS = [
@@ -974,8 +982,12 @@ export default function App() {
         if (!p.dividendFrequency && divs.frequency) next.dividendFrequency = divs.frequency;
         if (p.paysDividends === "nao" && (divs.nextPayDate || divs.lastPayDate)) next.paysDividends = "sim";
       }
-      // Obs: a faixa de 30 dias do mercado é guardada em min30/max30 (mostrada na tabela),
-      // e NÃO sobrescreve "Menor/Maior Preço Pago", que são dados seus.
+      // Faixa de 30 dias do mercado: preenche os campos Menor/Maior Preço 30D automaticamente
+      // (mesmo sem posição), para ações em observação ficarem completas de uma vez.
+      if (range) {
+        if (range.min30 != null) next.minPrice = String(range.min30.toFixed(2));
+        if (range.max30 != null) next.maxPrice = String(range.max30.toFixed(2));
+      }
       return next;
     });
     const found = [];
@@ -1026,7 +1038,8 @@ export default function App() {
       max30: form.maxPrice ? Number(form.maxPrice) : null,
       rangeAt: (form.minPrice || form.maxPrice) ? Date.now() : null,
     };
-    if (!s.ticker || !s.qty || !s.avgPrice) return;
+    // Exige apenas o ticker. Quantidade e preço podem ser 0 (ações em observação).
+    if (!s.ticker) return;
     setStocks(p => {
       const existing = p.find(x => x.id === editId);
       // Ao editar: se a usuária informou min/max manual, usa o dela; senão preserva o que já havia.
@@ -1091,16 +1104,21 @@ export default function App() {
 
   // ── Transações (fundação para rentabilidade real) ──
   const saveTransaction = () => {
+    const qtyNum = Number(txForm.qty);
+    const totalNum = Number(txForm.total);
+    // O valor total é o que a usuária digita (vem do extrato); o preço por ação é derivado.
+    const pricePerShare = qtyNum > 0 ? totalNum / qtyNum : 0;
     const tx = {
       id: Date.now(),
       ticker: txForm.ticker.toUpperCase().trim(),
       type: txForm.type, // COMPRA | VENDA
-      qty: Number(txForm.qty),
-      price: Number(txForm.price),
+      qty: qtyNum,
+      price: pricePerShare,
+      total: totalNum,
       date: txForm.date,
       fees: txForm.fees ? Number(txForm.fees) : 0,
     };
-    if (!tx.ticker || !tx.qty || !tx.price) return;
+    if (!tx.ticker || !tx.qty || !tx.total) return;
     setTransactions(p => [tx, ...p].sort((a, b) => new Date(b.date) - new Date(a.date)));
 
     // Atualiza a posição na carteira a partir da transação
@@ -1108,12 +1126,16 @@ export default function App() {
       const existing = prev.find(s => s.ticker === tx.ticker);
       if (tx.type === "COMPRA") {
         if (existing) {
-          const oldCost = existing.qty * existing.avgPrice;
+          // Força tudo a ser número, para evitar somas erradas (ex: "100"+20 como texto)
+          const exQty   = Number(existing.qty) || 0;
+          const exAvg   = Number(existing.avgPrice) || 0;
+          const exTotal = Number(existing.totalInvested) || (exQty * exAvg);
+          const oldCost = exQty * exAvg;
           const newCost = tx.qty * tx.price + tx.fees;
-          const newQty  = existing.qty + tx.qty;
+          const newQty  = exQty + tx.qty;
           const newAvg  = newQty > 0 ? (oldCost + newCost) / newQty : 0;
           return prev.map(s => s.ticker === tx.ticker
-            ? { ...s, qty: newQty, avgPrice: newAvg, totalInvested: (s.totalInvested || 0) + newCost }
+            ? { ...s, qty: newQty, avgPrice: newAvg, totalInvested: exTotal + newCost }
             : s);
         }
         // nova posição
@@ -1128,13 +1150,17 @@ export default function App() {
         }];
       } else { // VENDA
         if (existing) {
-          const newQty = Math.max(0, existing.qty - tx.qty);
+          const exQty   = Number(existing.qty) || 0;
+          const exAvg   = Number(existing.avgPrice) || 0;
+          const exReal  = Number(existing.realizedPL) || 0;
+          const exTotal = Number(existing.totalInvested) || (exQty * exAvg);
+          const newQty = Math.max(0, exQty - tx.qty);
           // Lucro/prejuízo realizado nesta venda = (preço de venda − preço médio) × qtd − taxas
-          const realizedGain = (tx.price - existing.avgPrice) * tx.qty - tx.fees;
-          const newRealizedPL = (existing.realizedPL || 0) + realizedGain;
+          const realizedGain = (tx.price - exAvg) * tx.qty - tx.fees;
+          const newRealizedPL = exReal + realizedGain;
           // Reduz o total investido proporcionalmente à parte vendida
-          const soldFraction = existing.qty > 0 ? tx.qty / existing.qty : 0;
-          const newTotalInvested = Math.max(0, (existing.totalInvested || existing.qty * existing.avgPrice) * (1 - soldFraction));
+          const soldFraction = exQty > 0 ? tx.qty / exQty : 0;
+          const newTotalInvested = Math.max(0, exTotal * (1 - soldFraction));
           // Guarda o resultado da venda para a mensagem de confirmação
           lastSellResultRef.current = { ticker: tx.ticker, gain: realizedGain, soldAll: newQty === 0 };
           return prev.map(s => s.ticker === tx.ticker
@@ -1145,7 +1171,7 @@ export default function App() {
       }
     });
 
-    setTxForm({ ticker: "", type: "COMPRA", qty: "", price: "", date: new Date().toISOString().slice(0, 10), fees: "" });
+    setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" });
     setShowTxForm(false);
 
     // Feedback do resultado da venda
@@ -1415,7 +1441,7 @@ export default function App() {
 
         {/* TABS */}
         <div className="tabs">
-          {[["portfolio","wallet","Carteira"],["watchlist","eye","Observando"],["distribution","donut","Distribuição"],["dividends","trending","Resultados"],["transactions","exchange","Transações"],["analysis","sparkles","Análise IA"],["alertlog","bell","Alertas"]].map(([id, icon, label]) => (
+          {[["portfolio","wallet","Carteira"],["watchlist","eye","Observando"],["archived","trash","Arquivadas"],["distribution","donut","Distribuição"],["dividends","trending","Resultados"],["transactions","exchange","Transações"],["analysis","sparkles","Análise IA"],["alertlog","bell","Alertas"]].map(([id, icon, label]) => (
             <button key={id} className={`tab${activeTab === id ? " active" : ""}`} onClick={() => setActiveTab(id)}><Icon name={icon} /> {label}</button>
           ))}
         </div>
@@ -1594,7 +1620,7 @@ export default function App() {
               <div style={{ fontSize: 13, color: "#64748b" }}>
                 {transactions.length} {transactions.length === 1 ? "transação registrada" : "transações registradas"}
               </div>
-              <button className="btn btn-primary btn-sm" onClick={() => { setTxForm({ ticker: "", type: "COMPRA", qty: "", price: "", date: new Date().toISOString().slice(0, 10), fees: "" }); setShowTxForm(true); }}>
+              <button className="btn btn-primary btn-sm" onClick={() => { setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" }); setShowTxForm(true); }}>
                 + Registrar Compra/Venda
               </button>
             </div>
@@ -2342,6 +2368,43 @@ export default function App() {
           )
         )}
 
+        {activeTab === "archived" && (
+          archivedStocks.length === 0 ? (
+            <div className="empty"><div className="empty-icon"><Icon name="trash" size={40} /></div><div>Nenhuma ação arquivada. Para arquivar, edite uma ação (lápis) e clique em "Arquivar" — útil para ações que você vendeu e não quer mais acompanhar, sem apagar o histórico.</div></div>
+          ) : (
+            <div className="card">
+              <div className="card-label" style={{ marginBottom: 6 }}>Arquivadas — {archivedStocks.length} {archivedStocks.length === 1 ? "ativo" : "ativos"}</div>
+              <div className="form-hint" style={{ marginBottom: 14 }}>Ações que você guardou. Não entram nos cálculos nem na carteira ativa. Para reativar, clique em "Restaurar".</div>
+              <table className="table">
+                <thead><tr><th>Ativo</th><th>Realizado</th><th>Tese</th><th></th></tr></thead>
+                <tbody>
+                  {archivedStocks.map(s => (
+                    <tr key={s.id}>
+                      <td>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <StockAvatar ticker={s.ticker} size={34} radius={9} />
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <span className="ticker-cell" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 200, display: "inline-block" }} title={s.name || s.ticker}>{s.name || s.ticker}</span>
+                            {s.sector && <div style={{ fontSize: 10, color: "#7c3aed", fontFamily: "'IBM Plex Mono',monospace" }}>{s.sector}</div>}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="mono" style={{ color: (s.realizedPL || 0) >= 0 ? "#4ade80" : "#f87171" }}>{s.realizedPL ? fmtCurrency(s.realizedPL) : "—"}</td>
+                      <td style={{ fontSize: 11, color: "#94a3b8", maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={s.note}>{s.note || "—"}</td>
+                      <td>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button className="btn btn-ghost btn-sm" onClick={() => setStocks(p => p.map(x => x.id === s.id ? { ...x, archived: false } : x))} title="Tirar do arquivo e voltar para a carteira/observação">Restaurar</button>
+                          <button className="btn btn-danger btn-sm" onClick={() => { if (window.confirm(`Excluir ${s.ticker} definitivamente?`)) deleteStock(s.id); }} title="Apagar de vez"><Icon name="trash" size={14} /></button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+
       </div>
 
       {/* PROFILE FORM */}
@@ -2601,7 +2664,7 @@ export default function App() {
             </div>
             <div className="form-hint" style={{ marginBottom: 12 }}>Menor/Maior preço dos últimos 30 dias: enquanto offline, preencha manualmente; quando o app estiver online, são buscados automaticamente e atualizados a cada virada de mês.</div>
             <div className="form-actions" style={{ justifyContent: "space-between" }}>
-              <div>
+              <div style={{ display: "flex", gap: 8 }}>
                 {editId && (
                   <button className="btn btn-danger" onClick={() => {
                     const stk = stocks.find(x => x.id === editId);
@@ -2612,12 +2675,21 @@ export default function App() {
                     }
                   }}>Excluir</button>
                 )}
+                {editId && (
+                  <button className="btn btn-ghost" onClick={() => setForm(p => ({ ...p, archived: !p.archived }))}
+                    title="Arquivar guarda a ação sem mostrá-la na carteira ativa; ela continua no histórico e pode ser restaurada.">
+                    {form.archived ? "Desarquivar" : "Arquivar"}
+                  </button>
+                )}
               </div>
               <div style={{ display: "flex", gap: 10 }}>
                 <button className="btn btn-ghost" onClick={() => { setShowForm(false); setEditId(null); setAutoFillMsg(null); }}>Cancelar</button>
                 <button className="btn btn-primary" onClick={saveStock}>{editId ? "Salvar" : "Adicionar"}</button>
               </div>
             </div>
+            {editId && form.archived && (
+              <div className="form-hint" style={{ marginTop: 8, color: "#fbbf24" }}>Esta ação será arquivada ao salvar — sai da carteira e da observação, mas fica guardada e pode voltar depois.</div>
+            )}
           </div>
         </div>
       )}
@@ -2653,14 +2725,12 @@ export default function App() {
                       setTxForm(p => ({ ...p, ticker: "", _novaManual: true }));
                       return;
                     }
-                    // Auto-preenche o preço com a cotação atual (se houver) e marca a ação
+                    // Seleciona a ação; o valor total é preenchido pela usuária (vem do extrato)
                     const stk = stocks.find(s => s.ticker === t);
-                    const q = quotes[t];
                     setTxForm(p => ({
                       ...p,
                       ticker: t,
                       _novaManual: false,
-                      price: q?.c ? String(q.c.toFixed(2)) : (stk ? String(stk.avgPrice) : p.price),
                     }));
                   }}>
                   <option value="">Selecione uma ação cadastrada…</option>
@@ -2711,9 +2781,12 @@ export default function App() {
                 })()}
               </div>
               <div className="form-group">
-                <label className="form-label">Preço por ação ($)</label>
-                <input className="form-input" type="number" step="0.01" placeholder="180.00" value={txForm.price}
-                  onChange={e => setTxForm(p => ({ ...p, price: e.target.value }))} />
+                <label className="form-label">Valor total da operação ($)</label>
+                <input className="form-input" type="number" step="0.01" placeholder="Ex: 660.03" value={txForm.total}
+                  onChange={e => setTxForm(p => ({ ...p, total: e.target.value }))} />
+                {txForm.qty && txForm.total && Number(txForm.qty) > 0 && (
+                  <div className="form-hint">Preço por ação: {fmtCurrency(Number(txForm.total) / Number(txForm.qty))}</div>
+                )}
               </div>
               <div className="form-group">
                 <label className="form-label">Data</label>
@@ -2726,9 +2799,10 @@ export default function App() {
                   onChange={e => setTxForm(p => ({ ...p, fees: e.target.value }))} />
               </div>
             </div>
-            {txForm.qty && txForm.price && (
+            {txForm.qty && txForm.total && (
               <div className="form-hint" style={{ marginBottom: 12 }}>
-                Total da operação: <strong style={{ color: "#e2e8f0" }}>{fmtCurrency(Number(txForm.qty) * Number(txForm.price) + (txForm.fees ? Number(txForm.fees) : 0))}</strong>
+                {txForm.type === "VENDA" ? "Valor recebido" : "Valor desembolsado"}: <strong style={{ color: "#e2e8f0" }}>{fmtCurrency(Number(txForm.total) + (txForm.type === "COMPRA" && txForm.fees ? Number(txForm.fees) : 0) - (txForm.type === "VENDA" && txForm.fees ? Number(txForm.fees) : 0))}</strong>
+                {txForm.fees ? <> (já {txForm.type === "VENDA" ? "descontadas" : "somadas"} as taxas de {fmtCurrency(Number(txForm.fees))})</> : null}
               </div>
             )}
             <div className="form-actions">
@@ -2744,20 +2818,29 @@ export default function App() {
         <div className="form-overlay" onClick={e => e.target === e.currentTarget && setShowAlertForm(null)}>
           <div className="form-box">
             <div className="form-title">Alertas — {showAlertForm}</div>
+            <div style={{ fontSize: 12, color: "#8b9ab5", marginBottom: 16, lineHeight: 1.5 }}>
+              Preencha só o lado que te interessa. Se deixar um campo <strong>vazio</strong>, aquele alerta não dispara. Ex: para uma ação que você só quer vender, preencha apenas o alvo de venda.
+            </div>
             <div className="alert-section" style={{ borderColor: "#7f1d1d" }}>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: "#f87171", marginBottom: 10, fontWeight: 600 }}>▼ Alerta de VENDA</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: "#f87171", fontWeight: 600 }}>▼ Alerta de VENDA</div>
+                {alertForm.sellTarget && <button className="btn btn-ghost btn-sm" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setAlertForm(p => ({ ...p, sellTarget: "" }))}>Limpar</button>}
+              </div>
               <div className="form-group">
                 <label className="form-label">Preço-alvo de venda ($)</label>
-                <input className="form-input" type="number" step="0.01" placeholder="Ex: 210.00"
+                <input className="form-input" type="number" step="0.01" placeholder="deixe vazio para não alertar"
                   value={alertForm.sellTarget} onChange={e => setAlertForm(p => ({ ...p, sellTarget: e.target.value }))} />
                 <div className="form-hint">Toca + notificação quando cotação ≥ este valor.</div>
               </div>
             </div>
             <div className="alert-section" style={{ borderColor: "#14532d" }}>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: "#4ade80", marginBottom: 10, fontWeight: 600 }}>▲ Alerta de COMPRA</div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, color: "#4ade80", fontWeight: 600 }}>▲ Alerta de COMPRA</div>
+                {alertForm.buyTarget && <button className="btn btn-ghost btn-sm" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => setAlertForm(p => ({ ...p, buyTarget: "" }))}>Limpar</button>}
+              </div>
               <div className="form-group">
                 <label className="form-label">Preço-piso de compra ($)</label>
-                <input className="form-input" type="number" step="0.01" placeholder="Ex: 160.00"
+                <input className="form-input" type="number" step="0.01" placeholder="deixe vazio para não alertar"
                   value={alertForm.buyTarget} onChange={e => setAlertForm(p => ({ ...p, buyTarget: e.target.value }))} />
                 <div className="form-hint">Toca + notificação quando cotação ≤ este valor.</div>
               </div>
