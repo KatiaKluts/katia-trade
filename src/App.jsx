@@ -42,7 +42,7 @@ function Icon({ name, size = 18, style, className }) {
   );
 }
 
-const FINNHUB_KEY = "d92338hr01qrfbe86aq0d92338hr01qrfbe86aqg";
+const FINNHUB_KEY = "d91rtg9r01qsj27nvmc0d91rtg9r01qsj27nvmcg";
 
 // Bump this when the seed list changes to re-import into existing installs.
 const SEED_VERSION = "2026-06-25-katia-v2";
@@ -1155,14 +1155,21 @@ export default function App() {
           const exReal  = Number(existing.realizedPL) || 0;
           const exTotal = Number(existing.totalInvested) || (exQty * exAvg);
           const newQty = Math.max(0, exQty - tx.qty);
-          // Lucro/prejuízo realizado nesta venda = (preço de venda − preço médio) × qtd − taxas
-          const realizedGain = (tx.price - exAvg) * tx.qty - tx.fees;
+          // Só calcula lucro realizado se houver um preço médio de compra válido.
+          // Sem preço médio (=0), não dá para saber o custo — então não inventa lucro.
+          let realizedGain = 0;
+          let semCusto = false;
+          if (exAvg > 0) {
+            realizedGain = (tx.price - exAvg) * tx.qty - tx.fees;
+          } else {
+            semCusto = true; // marca que a venda foi registrada sem base de custo
+          }
           const newRealizedPL = exReal + realizedGain;
           // Reduz o total investido proporcionalmente à parte vendida
           const soldFraction = exQty > 0 ? tx.qty / exQty : 0;
           const newTotalInvested = Math.max(0, exTotal * (1 - soldFraction));
           // Guarda o resultado da venda para a mensagem de confirmação
-          lastSellResultRef.current = { ticker: tx.ticker, gain: realizedGain, soldAll: newQty === 0 };
+          lastSellResultRef.current = { ticker: tx.ticker, gain: realizedGain, soldAll: newQty === 0, semCusto };
           return prev.map(s => s.ticker === tx.ticker
             ? { ...s, qty: newQty, realizedPL: newRealizedPL, totalInvested: newTotalInvested }
             : s);
@@ -1176,13 +1183,94 @@ export default function App() {
 
     // Feedback do resultado da venda
     if (tx.type === "VENDA" && lastSellResultRef.current) {
-      const { ticker, gain, soldAll } = lastSellResultRef.current;
-      const gainTxt = gain >= 0 ? `lucro de ${fmtCurrency(gain)}` : `prejuízo de ${fmtCurrency(Math.abs(gain))}`;
-      addToast(`${gain >= 0 ? "📈" : "📉"} Venda de ${ticker} registrada — ${gainTxt} realizado.${soldAll ? " Posição zerada (agora em 👀 Observando)." : ""}`, gain >= 0 ? "buy" : "sell");
+      const { ticker, gain, soldAll, semCusto } = lastSellResultRef.current;
+      if (semCusto) {
+        addToast(`⚠️ Venda de ${ticker} registrada, mas sem preço médio de compra cadastrado — o lucro/prejuízo NÃO foi calculado. Edite a ação e informe o preço médio para o cálculo ficar correto.`, "sell");
+      } else {
+        const gainTxt = gain >= 0 ? `lucro de ${fmtCurrency(gain)}` : `prejuízo de ${fmtCurrency(Math.abs(gain))}`;
+        addToast(`${gain >= 0 ? "📈" : "📉"} Venda de ${ticker} registrada — ${gainTxt} realizado.${soldAll ? " Posição zerada (agora em 👀 Observando)." : ""}`, gain >= 0 ? "buy" : "sell");
+      }
       lastSellResultRef.current = null;
     }
   };
-  const deleteTransaction = (id) => setTransactions(p => p.filter(t => t.id !== id));
+  // Apagar uma transação: remove da lista E recalcula a posição da ação do zero,
+  // a partir das transações restantes — garante que os dados nunca fiquem inconsistentes.
+  const deleteTransaction = (id) => {
+    const txToDelete = transactions.find(t => t.id === id);
+    if (!txToDelete) return;
+    if (!window.confirm(`Apagar esta transação de ${txToDelete.type === "VENDA" ? "venda" : "compra"} de ${txToDelete.ticker}? A posição da ação será recalculada.`)) return;
+
+    const ticker = txToDelete.ticker;
+    const remaining = transactions.filter(t => t.id !== id);
+    setTransactions(remaining);
+
+    // Recalcula a posição da ação a partir das transações restantes (em ordem cronológica)
+    const txForTicker = remaining
+      .filter(t => t.ticker === ticker)
+      .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+
+    setStocks(prev => prev.map(s => {
+      if (s.ticker !== ticker) return s;
+      let qty = 0, totalCost = 0, realizedPL = 0;
+      for (const t of txForTicker) {
+        const tQty = Number(t.qty) || 0;
+        const tPrice = Number(t.price) || 0;
+        const tFees = Number(t.fees) || 0;
+        if (t.type === "COMPRA") {
+          totalCost += tQty * tPrice + tFees;
+          qty += tQty;
+        } else { // VENDA
+          const avg = qty > 0 ? totalCost / qty : 0;
+          realizedPL += (tPrice - avg) * tQty - tFees;
+          const soldFraction = qty > 0 ? tQty / qty : 0;
+          totalCost = Math.max(0, totalCost * (1 - soldFraction));
+          qty = Math.max(0, qty - tQty);
+        }
+      }
+      const avgPrice = qty > 0 ? totalCost / qty : (Number(s.avgPrice) || 0);
+      return {
+        ...s,
+        qty,
+        avgPrice: qty > 0 ? avgPrice : s.avgPrice,
+        totalInvested: totalCost,
+        realizedPL,
+      };
+    }));
+    addToast(`Transação de ${ticker} apagada e posição recalculada.`, "info");
+  };
+
+  // Versão sem confirmação, usada ao EDITAR (apaga a antiga para recriar a corrigida)
+  const deleteTransactionSilent = (id) => {
+    const txToDelete = transactions.find(t => t.id === id);
+    if (!txToDelete) return;
+    const ticker = txToDelete.ticker;
+    const remaining = transactions.filter(t => t.id !== id);
+    setTransactions(remaining);
+    const txForTicker = remaining
+      .filter(t => t.ticker === ticker)
+      .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+    setStocks(prev => prev.map(s => {
+      if (s.ticker !== ticker) return s;
+      let qty = 0, totalCost = 0, realizedPL = 0;
+      for (const t of txForTicker) {
+        const tQty = Number(t.qty) || 0;
+        const tPrice = Number(t.price) || 0;
+        const tFees = Number(t.fees) || 0;
+        if (t.type === "COMPRA") {
+          totalCost += tQty * tPrice + tFees;
+          qty += tQty;
+        } else {
+          const avg = qty > 0 ? totalCost / qty : 0;
+          realizedPL += (tPrice - avg) * tQty - tFees;
+          const soldFraction = qty > 0 ? tQty / qty : 0;
+          totalCost = Math.max(0, totalCost * (1 - soldFraction));
+          qty = Math.max(0, qty - tQty);
+        }
+      }
+      const avgPrice = qty > 0 ? totalCost / qty : (Number(s.avgPrice) || 0);
+      return { ...s, qty, avgPrice: qty > 0 ? avgPrice : s.avgPrice, totalInvested: totalCost, realizedPL };
+    }));
+  };
 
   // ── Fluxo de dividendos (mensal e anual projetado) ──
   const dividendFlow = (() => {
@@ -1649,7 +1737,21 @@ export default function App() {
                         <td className="mono">{fmtCurrency(t.price)}</td>
                         <td className="mono" style={{ color: "#64748b" }}>{t.fees ? fmtCurrency(t.fees) : "—"}</td>
                         <td className="mono" style={{ color: t.type === "COMPRA" ? "#f87171" : "#4ade80" }}>{fmtCurrency(total)}</td>
-                        <td><button className="btn btn-danger btn-sm" onClick={() => deleteTransaction(t.id)}>✕</button></td>
+                        <td>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button className="btn btn-ghost btn-sm" title="Editar (recalcula a posição)" onClick={() => {
+                              // Carrega a transação no formulário e remove a antiga; ao salvar, cria a corrigida
+                              setTxForm({
+                                ticker: t.ticker, type: t.type, qty: String(t.qty),
+                                total: String(t.total != null ? t.total : (Number(t.qty) * Number(t.price))),
+                                date: t.date, fees: t.fees ? String(t.fees) : "",
+                              });
+                              deleteTransactionSilent(t.id);
+                              setShowTxForm(true);
+                            }}><Icon name="pencil" size={14} /></button>
+                            <button className="btn btn-danger btn-sm" onClick={() => deleteTransaction(t.id)}>✕</button>
+                          </div>
+                        </td>
                       </tr>
                     );
                   })}
