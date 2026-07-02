@@ -42,7 +42,7 @@ function Icon({ name, size = 18, style, className }) {
   );
 }
 
-const FINNHUB_KEY = "d9377dpr01qq79pbeu20d9377dpr01qq79pbeu2g";
+const FINNHUB_KEY = "d91rtg9r01qsj27nvmc0d91rtg9r01qsj27nvmcg";
 
 // Bump this when the seed list changes to re-import into existing installs.
 const SEED_VERSION = "2026-06-25-katia-v2";
@@ -694,6 +694,7 @@ export default function App() {
   const [autoFillMsg, setAutoFillMsg] = useState(null);
   const [alertForm, setAlertForm] = useState({ sellTarget: "", buyTarget: "" });
   const [lastUpdate, setLastUpdate] = useState(null);
+  const [refreshProgress, setRefreshProgress] = useState(null); // {done, total} enquanto atualiza
   const [editId, setEditId]         = useState(null);
   const [toasts, setToasts]         = useState([]);
 
@@ -850,20 +851,23 @@ export default function App() {
     if (!stocks.length || refreshingRef.current) return;
     refreshingRef.current = true;
     const qs = { ...quotes };
-    const BATCH = 5;
-    const PAUSE = 1100; // ~1s entre lotes
+    // Ritmo seguro para o plano gratuito do Finnhub (~60 req/min):
+    // uma ação de cada vez, com pausa entre elas. Evita o erro 429.
+    const PAUSE = 1100; // ~1,1s entre cada ação → no máximo ~55 consultas/min
     try {
-      for (let i = 0; i < stocks.length; i += BATCH) {
-        const slice = stocks.slice(i, i + BATCH);
-        const results = await Promise.all(slice.map(async s => [s.ticker, await fetchQuote(s.ticker)]));
-        results.forEach(([t, q]) => { if (q && q.c) qs[t] = q; });
+      for (let i = 0; i < stocks.length; i++) {
+        const s = stocks[i];
+        setRefreshProgress({ done: i, total: stocks.length });
+        const q = await fetchQuote(s.ticker);
+        if (q && q.c) qs[s.ticker] = q;
         setQuotes({ ...qs });
         setLastUpdate(new Date());
         checkAlerts(qs, stocks, alerts);
-        if (i + BATCH < stocks.length) await new Promise(r => setTimeout(r, PAUSE));
+        if (i < stocks.length - 1) await new Promise(r => setTimeout(r, PAUSE));
       }
     } finally {
       refreshingRef.current = false;
+      setRefreshProgress(null);
     }
   }, [stocks, alerts, checkAlerts, quotes]);
 
@@ -1452,7 +1456,9 @@ export default function App() {
               <button className="btn btn-ghost btn-sm" onClick={enableNotifications} title="Ativar notificações"><Icon name="bell" /> Ativar avisos</button>
             )}
             {highCount > 0 && <span className="badge badge-threat pulse" style={{ cursor: "pointer" }} onClick={() => setActiveTab("analysis")} title="Ver análises"><Icon name="alert" size={14} /> {highCount} crítico{highCount > 1 ? "s" : ""}</span>}
-            {lastUpdate && <span className="badge"><Icon name="refresh" size={13} /> {lastUpdate.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</span>}
+            {refreshProgress
+              ? <span className="badge" style={{ color: "#22d3ee" }}><Icon name="refresh" size={13} /> atualizando {refreshProgress.done}/{refreshProgress.total}…</span>
+              : lastUpdate && <span className="badge"><Icon name="refresh" size={13} /> {lastUpdate.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</span>}
             {/* engrenagem com menu */}
             <div style={{ position: "relative" }}>
               <button className="btn btn-ghost btn-sm" onClick={() => setShowSettings(v => !v)} title="Configurações e ferramentas" aria-label="Configurações"><Icon name="gear" /></button>
