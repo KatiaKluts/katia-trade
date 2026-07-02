@@ -2441,6 +2441,7 @@ export default function App() {
                         <td>
                           <div style={{ display: "flex", gap: 4 }}>
                             <button className="btn btn-ghost btn-sm" onClick={() => refreshOne(s.ticker)} title="Atualizar cotação"><Icon name="refresh" /></button>
+                            <button className={`btn btn-sm ${a && (a.buyTarget || a.sellTarget) ? "btn-bell active" : "btn-bell"}`} onClick={() => openAlertForm(s.ticker)} title="Criar alerta de preço (avisa quando chegar no valor ideal de compra)"><Icon name="bell" /></button>
                             <button className={`btn btn-sm ${analyses[s.ticker] ? "btn-analyse" : "btn-ghost"}`} onClick={() => analyseStock(s)} disabled={loading[s.ticker]} title={analyses[s.ticker] ? "Ver/refazer análise" : "Analisar com IA"}><Icon name={loading[s.ticker] ? "loader" : "sparkles"} /></button>
                             <button className="btn btn-ghost btn-sm" onClick={() => startEdit(s)} title="Editar / excluir"><Icon name="pencil" /></button>
                           </div>
