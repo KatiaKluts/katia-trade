@@ -587,6 +587,7 @@ export default function App() {
       totalInvested: s.totalInvested != null ? Number(s.totalInvested) : (Number(s.qty) || 0) * (Number(s.avgPrice) || 0),
       minPrice: s.minPrice ?? null, maxPrice: s.maxPrice ?? null,
       min30: s.min30 ?? null, max30: s.max30 ?? null, rangeAt: s.rangeAt ?? null,
+      rangeManual: !!s.rangeManual,
       paysDividends: !!s.paysDividends, dividendYield: s.dividendYield ?? null, dividendFrequency: s.dividendFrequency ?? null,
       nextPayDate: s.nextPayDate ?? null, status: migrateStatus(s.status), realizedPL: Number(s.realizedPL) || 0,
       stopLoss: s.stopLoss ?? null, buyDate: s.buyDate ?? null, note: s.note ?? "", archived: !!s.archived,
@@ -896,10 +897,12 @@ export default function App() {
     setRangeLoading(p => ({ ...p, [ticker]: true }));
     const range = await fetch30DayRange(ticker);
     if (range) {
-      // Atualiza tanto a faixa exibida (min30/max30) quanto os campos do formulário (minPrice/maxPrice)
-      setStocks(p => p.map(s => s.ticker === ticker
-        ? { ...s, min30: range.min30, max30: range.max30, minPrice: range.min30, maxPrice: range.max30, rangeAt: range.fetchedAt }
-        : s));
+      // Só atualiza automaticamente se a ação NÃO tiver um valor manual fixado pela usuária.
+      setStocks(p => p.map(s => {
+        if (s.ticker !== ticker) return s;
+        if (s.rangeManual) return s; // respeita o valor manual — não sobrescreve
+        return { ...s, min30: range.min30, max30: range.max30, rangeAt: range.fetchedAt };
+      }));
     }
     setRangeLoading(p => ({ ...p, [ticker]: false }));
   }, []);
@@ -986,12 +989,8 @@ export default function App() {
         if (!p.dividendFrequency && divs.frequency) next.dividendFrequency = divs.frequency;
         if (p.paysDividends === "nao" && (divs.nextPayDate || divs.lastPayDate)) next.paysDividends = "sim";
       }
-      // Faixa de 30 dias do mercado: preenche os campos Menor/Maior Preço 30D automaticamente
-      // (mesmo sem posição), para ações em observação ficarem completas de uma vez.
-      if (range) {
-        if (range.min30 != null) next.minPrice = String(range.min30.toFixed(2));
-        if (range.max30 != null) next.maxPrice = String(range.max30.toFixed(2));
-      }
+      // Obs: o mín/máx 30d NÃO é preenchido aqui de propósito — ele é automático (buscado online
+      // ao salvar e mantido atualizado). Preencher aqui marcaria como "manual" e travaria o valor.
       return next;
     });
     const found = [];
@@ -1037,25 +1036,29 @@ export default function App() {
       status: form.status || "MANTER",
       realizedPL: form.realizedPL ? Number(form.realizedPL) : 0,
       nextPayDate: null,
-      // min30/max30 = faixa exibida na tabela. Usa o valor manual se informado.
+      // min30/max30 = faixa exibida na tabela.
+      // Se a usuária deixar vazio → automático (busca online). Se digitar → manual (rangeManual=true).
       min30: form.minPrice ? Number(form.minPrice) : null,
       max30: form.maxPrice ? Number(form.maxPrice) : null,
+      rangeManual: !!(form.minPrice || form.maxPrice),
       rangeAt: (form.minPrice || form.maxPrice) ? Date.now() : null,
     };
     // Exige apenas o ticker. Quantidade e preço podem ser 0 (ações em observação).
     if (!s.ticker) return;
     setStocks(p => {
       const existing = p.find(x => x.id === editId);
-      // Ao editar: se a usuária informou min/max manual, usa o dela; senão preserva o que já havia.
+      // Ao editar: se a usuária digitou min/max, é manual; se deixou vazio, volta a ser automático.
+      const isManual = !!(form.minPrice || form.maxPrice);
       const merged = existing ? {
         ...existing, ...s,
-        min30: (form.minPrice ? Number(form.minPrice) : existing.min30),
-        max30: (form.maxPrice ? Number(form.maxPrice) : existing.max30),
-        rangeAt: (form.minPrice || form.maxPrice) ? Date.now() : existing.rangeAt,
+        min30: isManual ? Number(form.minPrice || existing.min30) : null,
+        max30: isManual ? Number(form.maxPrice || existing.max30) : null,
+        rangeManual: isManual,
+        rangeAt: isManual ? Date.now() : null,
       } : s;
       return editId ? p.map(x => x.id === editId ? merged : x) : [...p, s];
     });
-    // Busca a faixa real de 30 dias (só funciona quando online; não apaga valor manual em caso de falha)
+    // Busca a faixa real de 30 dias online (a menos que a usuária tenha fixado um valor manual)
     setTimeout(() => refresh30DayRange(s.ticker), 300);
     setForm({ ticker: "", name: "", assetClass: "Ação", qty: "", avgPrice: "", minPrice: "", maxPrice: "", totalInvested: "", sector: "", leveraged: false, strategy: "Satélite", paysDividends: "nao", dividendYield: "", dividendFrequency: "", status: "MANTER", realizedPL: "", stopLoss: "", buyDate: "", note: "", archived: false });
     setAutoFillMsg(null);
@@ -1065,8 +1068,9 @@ export default function App() {
   const startEdit = (s) => {
     setForm({
       ticker: s.ticker, name: s.name, qty: s.qty, avgPrice: s.avgPrice,
-      minPrice: s.min30 ?? s.minPrice ?? "",
-      maxPrice: s.max30 ?? s.maxPrice ?? "",
+      // Só preenche o campo se for valor MANUAL. Se for automático, deixa vazio (mostra placeholder "Auto").
+      minPrice: s.rangeManual ? (s.min30 ?? "") : "",
+      maxPrice: s.rangeManual ? (s.max30 ?? "") : "",
       totalInvested: s.totalInvested ?? "",
       sector: s.sector || "",
       assetClass: s.assetClass || "Ação",
@@ -2612,6 +2616,7 @@ export default function App() {
                 <label className="form-label">Maior Preço 30d ($)</label>
                 <input className="form-input" type="number" step="0.01" placeholder="Auto quando online" value={form.maxPrice}
                   onChange={e => setForm(p => ({ ...p, maxPrice: e.target.value }))} />
+                <div className="form-hint">Deixe em branco para atualizar automaticamente online. Só preencha se quiser fixar um valor manual.</div>
               </div>
               {/* Asset class */}
               <div className="form-group">
