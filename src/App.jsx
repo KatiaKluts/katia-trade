@@ -1119,6 +1119,21 @@ export default function App() {
       fees: txForm.fees ? Number(txForm.fees) : 0,
     };
     if (!tx.ticker || !tx.qty || !tx.total) return;
+
+    const editingId = txForm._editingId || null;
+
+    // Se estamos EDITANDO: monta a nova lista (sem a antiga, com a nova) e recalcula a posição do zero.
+    if (editingId) {
+      const newList = [tx, ...transactions.filter(t => t.id !== editingId)]
+        .sort((a, b) => new Date(b.date) - new Date(a.date));
+      setTransactions(newList);
+      recomputePositionFromTx(tx.ticker, newList);
+      setShowTxForm(false);
+      setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" });
+      addToast(`Transação de ${tx.ticker} atualizada e posição recalculada.`, "info");
+      return;
+    }
+
     setTransactions(p => [tx, ...p].sort((a, b) => new Date(b.date) - new Date(a.date)));
 
     // Atualiza a posição na carteira a partir da transação
@@ -1193,60 +1208,10 @@ export default function App() {
       lastSellResultRef.current = null;
     }
   };
-  // Apagar uma transação: remove da lista E recalcula a posição da ação do zero,
-  // a partir das transações restantes — garante que os dados nunca fiquem inconsistentes.
-  const deleteTransaction = (id) => {
-    const txToDelete = transactions.find(t => t.id === id);
-    if (!txToDelete) return;
-    if (!window.confirm(`Apagar esta transação de ${txToDelete.type === "VENDA" ? "venda" : "compra"} de ${txToDelete.ticker}? A posição da ação será recalculada.`)) return;
-
-    const ticker = txToDelete.ticker;
-    const remaining = transactions.filter(t => t.id !== id);
-    setTransactions(remaining);
-
-    // Recalcula a posição da ação a partir das transações restantes (em ordem cronológica)
-    const txForTicker = remaining
-      .filter(t => t.ticker === ticker)
-      .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
-
-    setStocks(prev => prev.map(s => {
-      if (s.ticker !== ticker) return s;
-      let qty = 0, totalCost = 0, realizedPL = 0;
-      for (const t of txForTicker) {
-        const tQty = Number(t.qty) || 0;
-        const tPrice = Number(t.price) || 0;
-        const tFees = Number(t.fees) || 0;
-        if (t.type === "COMPRA") {
-          totalCost += tQty * tPrice + tFees;
-          qty += tQty;
-        } else { // VENDA
-          const avg = qty > 0 ? totalCost / qty : 0;
-          realizedPL += (tPrice - avg) * tQty - tFees;
-          const soldFraction = qty > 0 ? tQty / qty : 0;
-          totalCost = Math.max(0, totalCost * (1 - soldFraction));
-          qty = Math.max(0, qty - tQty);
-        }
-      }
-      const avgPrice = qty > 0 ? totalCost / qty : (Number(s.avgPrice) || 0);
-      return {
-        ...s,
-        qty,
-        avgPrice: qty > 0 ? avgPrice : s.avgPrice,
-        totalInvested: totalCost,
-        realizedPL,
-      };
-    }));
-    addToast(`Transação de ${ticker} apagada e posição recalculada.`, "info");
-  };
-
-  // Versão sem confirmação, usada ao EDITAR (apaga a antiga para recriar a corrigida)
-  const deleteTransactionSilent = (id) => {
-    const txToDelete = transactions.find(t => t.id === id);
-    if (!txToDelete) return;
-    const ticker = txToDelete.ticker;
-    const remaining = transactions.filter(t => t.id !== id);
-    setTransactions(remaining);
-    const txForTicker = remaining
+  // Recalcula a posição de uma ação do zero, a partir de uma lista de transações.
+  // Usada ao editar ou apagar transações — garante consistência total.
+  const recomputePositionFromTx = (ticker, txList) => {
+    const txForTicker = txList
       .filter(t => t.ticker === ticker)
       .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
     setStocks(prev => prev.map(s => {
@@ -1270,6 +1235,18 @@ export default function App() {
       const avgPrice = qty > 0 ? totalCost / qty : (Number(s.avgPrice) || 0);
       return { ...s, qty, avgPrice: qty > 0 ? avgPrice : s.avgPrice, totalInvested: totalCost, realizedPL };
     }));
+  };
+
+  // Apagar uma transação: remove da lista E recalcula a posição da ação do zero.
+  const deleteTransaction = (id) => {
+    const txToDelete = transactions.find(t => t.id === id);
+    if (!txToDelete) return;
+    if (!window.confirm(`Apagar esta transação de ${txToDelete.type === "VENDA" ? "venda" : "compra"} de ${txToDelete.ticker}? A posição da ação será recalculada.`)) return;
+    const ticker = txToDelete.ticker;
+    const remaining = transactions.filter(t => t.id !== id);
+    setTransactions(remaining);
+    recomputePositionFromTx(ticker, remaining);
+    addToast(`Transação de ${ticker} apagada e posição recalculada.`, "info");
   };
 
   // ── Fluxo de dividendos (mensal e anual projetado) ──
@@ -1739,14 +1716,15 @@ export default function App() {
                         <td className="mono" style={{ color: t.type === "COMPRA" ? "#f87171" : "#4ade80" }}>{fmtCurrency(total)}</td>
                         <td>
                           <div style={{ display: "flex", gap: 6 }}>
-                            <button className="btn btn-ghost btn-sm" title="Editar (recalcula a posição)" onClick={() => {
-                              // Carrega a transação no formulário e remove a antiga; ao salvar, cria a corrigida
+                            <button className="btn btn-ghost btn-sm" title="Editar transação" onClick={() => {
+                              // Carrega os dados no formulário e marca qual transação está sendo editada.
+                              // A troca só acontece ao SALVAR — assim a transação não some se você desistir.
                               setTxForm({
                                 ticker: t.ticker, type: t.type, qty: String(t.qty),
                                 total: String(t.total != null ? t.total : (Number(t.qty) * Number(t.price))),
                                 date: t.date, fees: t.fees ? String(t.fees) : "",
+                                _editingId: t.id,
                               });
-                              deleteTransactionSilent(t.id);
                               setShowTxForm(true);
                             }}><Icon name="pencil" size={14} /></button>
                             <button className="btn btn-danger btn-sm" onClick={() => deleteTransaction(t.id)}>✕</button>
