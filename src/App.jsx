@@ -43,6 +43,8 @@ function Icon({ name, size = 18, style, className }) {
 }
 
 const FINNHUB_KEY = "d9377dpr01qq79pbeu20d9377dpr01qq79pbeu2g";
+// Twelve Data: usado só para o histórico de 30 dias (mín/máx reais). Plano grátis: 800 req/dia.
+const TWELVE_DATA_KEY = "d6d185bf6730430fa9a2cbd1854b7535";
 
 // Bump this when the seed list changes to re-import into existing installs.
 const SEED_VERSION = "2026-06-25-katia-v2";
@@ -374,14 +376,56 @@ function useAudio() {
 
 // ── Finnhub ────────────────────────────────────────────────────────────────
 async function fetchQuote(ticker) {
+  // FONTE PRINCIPAL: Finnhub (rápido, 60/min) — cotação e variação do dia
   try {
     const r = await fetch(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${FINNHUB_KEY}`);
-    return await r.json();
-  } catch { return null; }
+    if (r.ok) {
+      const d = await r.json();
+      // Finnhub devolve c=preço atual, d=variação, dp=variação %, h/l=máx/mín do dia, pc=fechamento anterior
+      if (d && d.c) return d;
+    }
+    // se resposta não veio boa (401, 429, vazia), cai para o backup
+  } catch { /* cai para o backup */ }
+
+  // BACKUP DE EMERGÊNCIA: Twelve Data (só quando o Finnhub falha).
+  // Usa o endpoint /quote e converte para o mesmo formato do Finnhub (c, d, dp, h, l, pc).
+  try {
+    const r = await fetch(`https://api.twelvedata.com/quote?symbol=${ticker}&apikey=${TWELVE_DATA_KEY}`);
+    const d = await r.json();
+    if (d && d.status !== "error" && d.close) {
+      const close = Number(d.close);
+      const prev  = Number(d.previous_close) || close;
+      return {
+        c: close,
+        d: close - prev,
+        dp: prev ? ((close - prev) / prev) * 100 : 0,
+        h: Number(d.high) || close,
+        l: Number(d.low) || close,
+        pc: prev,
+        _source: "twelvedata", // marca que veio do backup
+      };
+    }
+  } catch { /* nada */ }
+  return null;
 }
 
 async function fetch30DayRange(ticker) {
-  // 1) tenta o histórico de 30 dias (endpoint candle)
+  // 1) FONTE PRINCIPAL: Twelve Data — histórico diário real dos últimos ~30 dias.
+  //    Retorna a menor mínima e a maior máxima do período (igual ao que a corretora mostra).
+  try {
+    const r = await fetch(
+      `https://api.twelvedata.com/time_series?symbol=${ticker}&interval=1day&outputsize=30&apikey=${TWELVE_DATA_KEY}`
+    );
+    const d = await r.json();
+    if (d && d.status !== "error" && Array.isArray(d.values) && d.values.length) {
+      const lows  = d.values.map(v => Number(v.low)).filter(n => !isNaN(n));
+      const highs = d.values.map(v => Number(v.high)).filter(n => !isNaN(n));
+      if (lows.length && highs.length) {
+        return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "twelvedata" };
+      }
+    }
+  } catch { /* segue para o fallback */ }
+  // 2) FALLBACK: histórico do Finnhub (candle) — pode estar bloqueado no plano grátis
   try {
     const to   = Math.floor(Date.now() / 1000);
     const from = to - 30 * 86400;
@@ -390,10 +434,10 @@ async function fetch30DayRange(ticker) {
     );
     const d = await r.json();
     if (d.s === "ok" && d.h?.length) {
-      return { min30: Math.min(...d.l), max30: Math.max(...d.h), fetchedAt: Date.now() };
+      return { min30: Math.min(...d.l), max30: Math.max(...d.h), fetchedAt: Date.now(), source: "finnhub" };
     }
-  } catch { /* segue para o fallback */ }
-  // 2) fallback (plano grátis): usa a máxima/mínima do dia da cotação atual
+  } catch { /* segue para o último fallback */ }
+  // 3) ÚLTIMO FALLBACK: máxima/mínima do dia da cotação atual (aproximação)
   try {
     const q = await fetchQuote(ticker);
     if (q && q.h && q.l) {
@@ -740,6 +784,8 @@ export default function App() {
   // Exporta a carteira para CSV (abre no Excel / Google Sheets)
   const exportCSV = () => {
     const cols = ["Ticker","Nome","Classe","Setor","Estrategia","Orientacao","Quantidade","PrecoMedio","TotalInvestido","CotacaoAtual","ValorAtual","LucroPrejuizo","RentabilidadePct","PagaDividendos","DividendYield","StopLoss","DataCompra","Nota"];
+    // Arredonda valores monetários para 2 casas (ex: 699.11) — número limpo e calculável no Excel
+    const money = (v) => (v === "" || v == null || isNaN(v)) ? "" : Number(v).toFixed(2);
     const rows = stocks.map(s => {
       const q = quotes[s.ticker];
       const cur = q?.c ? s.qty * q.c : "";
@@ -752,8 +798,8 @@ export default function App() {
       };
       return [
         s.ticker, s.name, s.assetClass || "Ação", s.sector || "", s.strategy || "", s.status || "",
-        s.qty, s.avgPrice, inv, q?.c ?? "", cur, pl, plPct,
-        s.paysDividends ? "Sim" : "Não", s.dividendYield ?? "", s.stopLoss ?? "", s.buyDate ?? "", s.note ?? "",
+        Number(s.qty), money(s.avgPrice), money(inv), money(q?.c ?? ""), money(cur), money(pl), plPct,
+        s.paysDividends ? "Sim" : "Não", s.dividendYield ?? "", money(s.stopLoss ?? ""), s.buyDate ?? "", s.note ?? "",
       ].map(esc).join(";");
     });
     const csv = "\uFEFF" + [cols.join(";"), ...rows].join("\n"); // BOM p/ acentos no Excel
@@ -855,16 +901,20 @@ export default function App() {
     // Ritmo seguro para o plano gratuito do Finnhub (~60 req/min):
     // uma ação de cada vez, com pausa entre elas. Evita o erro 429.
     const PAUSE = 1100; // ~1,1s entre cada ação → no máximo ~55 consultas/min
+    let usingBackup = false; // se o Finnhub cair e entrar no Twelve Data, desacelera
     try {
       for (let i = 0; i < stocks.length; i++) {
         const s = stocks[i];
         setRefreshProgress({ done: i, total: stocks.length });
         const q = await fetchQuote(s.ticker);
         if (q && q.c) qs[s.ticker] = q;
+        if (q && q._source === "twelvedata") usingBackup = true; // detectou uso do backup
         setQuotes({ ...qs });
         setLastUpdate(new Date());
         checkAlerts(qs, stocks, alerts);
-        if (i < stocks.length - 1) await new Promise(r => setTimeout(r, PAUSE));
+        // Pausa adaptativa: Finnhub aguenta ~55/min (1,1s); o backup Twelve Data só ~8/min (8s).
+        const pause = usingBackup ? 8000 : PAUSE;
+        if (i < stocks.length - 1) await new Promise(r => setTimeout(r, pause));
       }
     } finally {
       refreshingRef.current = false;
@@ -907,19 +957,21 @@ export default function App() {
     setRangeLoading(p => ({ ...p, [ticker]: false }));
   }, []);
 
-  // Ao abrir: atualiza a faixa de 30 dias quando o mês virou desde a última busca (ou se nunca buscou).
+  // Ao abrir: atualiza a faixa de 30 dias uma vez por dia por ação (Twelve Data: 800 req/dia).
+  // Respeita valor manual (rangeManual) e escalona as buscas para não sobrecarregar.
   useEffect(() => {
-    const now = new Date();
-    const thisMonthKey = now.getFullYear() * 12 + now.getMonth();
+    const todayStr = new Date().toDateString();
+    let delay = 0;
     stocks.forEach(s => {
+      if (s.rangeManual) return; // valor fixado manualmente — não busca
       let needs = false;
       if (!s.rangeAt) needs = true;
-      else {
-        const last = new Date(s.rangeAt);
-        const lastMonthKey = last.getFullYear() * 12 + last.getMonth();
-        if (thisMonthKey > lastMonthKey) needs = true; // mudou de mês
+      else if (new Date(s.rangeAt).toDateString() !== todayStr) needs = true; // ainda não buscou hoje
+      if (needs) {
+        // escalona: uma ação a cada 400ms, para não disparar tudo de uma vez
+        setTimeout(() => refresh30DayRange(s.ticker), delay);
+        delay += 400;
       }
-      if (needs) refresh30DayRange(s.ticker);
     });
   }, []); // eslint-disable-line
 
