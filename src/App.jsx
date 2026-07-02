@@ -902,10 +902,12 @@ export default function App() {
     // uma ação de cada vez, com pausa entre elas. Evita o erro 429.
     const PAUSE = 1100; // ~1,1s entre cada ação → no máximo ~55 consultas/min
     let usingBackup = false; // se o Finnhub cair e entrar no Twelve Data, desacelera
+    // Só atualiza ações ativas e em observação — as ARQUIVADAS são ignoradas (economiza API).
+    const toUpdate = stocks.filter(s => !s.archived);
     try {
-      for (let i = 0; i < stocks.length; i++) {
-        const s = stocks[i];
-        setRefreshProgress({ done: i, total: stocks.length });
+      for (let i = 0; i < toUpdate.length; i++) {
+        const s = toUpdate[i];
+        setRefreshProgress({ done: i, total: toUpdate.length });
         const q = await fetchQuote(s.ticker);
         if (q && q.c) qs[s.ticker] = q;
         if (q && q._source === "twelvedata") usingBackup = true; // detectou uso do backup
@@ -914,7 +916,7 @@ export default function App() {
         checkAlerts(qs, stocks, alerts);
         // Pausa adaptativa: Finnhub aguenta ~55/min (1,1s); o backup Twelve Data só ~8/min (8s).
         const pause = usingBackup ? 8000 : PAUSE;
-        if (i < stocks.length - 1) await new Promise(r => setTimeout(r, pause));
+        if (i < toUpdate.length - 1) await new Promise(r => setTimeout(r, pause));
       }
     } finally {
       refreshingRef.current = false;
@@ -963,6 +965,7 @@ export default function App() {
     const todayStr = new Date().toDateString();
     let delay = 0;
     stocks.forEach(s => {
+      if (s.archived) return;    // arquivadas não atualizam (só se forem desarquivadas)
       if (s.rangeManual) return; // valor fixado manualmente — não busca
       let needs = false;
       if (!s.rangeAt) needs = true;
