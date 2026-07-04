@@ -2150,8 +2150,8 @@ export default function App() {
               {stocks.length > 0 && (
                 <div style={{ marginTop: 20, display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
                   {[...stocks].sort((a, b) => a.ticker.localeCompare(b.ticker)).map(s => (
-                    <button key={s.id} className="btn btn-analyse" onClick={() => analyseStock(s)} disabled={loading[s.ticker]}>
-                      {loading[s.ticker] ? "Analisando…" : `Analisar ${s.ticker}`}
+                    <button key={s.id} className="btn btn-analyse btn-sm" onClick={() => analyseStock(s)} disabled={loading[s.ticker]}>
+                      {loading[s.ticker] ? "…" : s.ticker}
                     </button>
                   ))}
                 </div>
