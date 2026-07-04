@@ -43,8 +43,11 @@ function Icon({ name, size = 18, style, className }) {
 }
 
 const FINNHUB_KEY = "d9377dpr01qq79pbeu20d9377dpr01qq79pbeu2g";
-// Twelve Data: usado só para o histórico de 30 dias (mín/máx reais). Plano grátis: 800 req/dia.
+// Twelve Data: usado como backup de cotação quando o Finnhub falha. Plano grátis: 8 req/min.
 const TWELVE_DATA_KEY = "d6d185bf6730430fa9a2cbd1854b7535";
+// Financial Modeling Prep (FMP): histórico diário de 30 dias (mín/máx reais, iguais à corretora).
+// Plano grátis: 250 req/dia. Traz open/high/low/close de cada dia.
+const FMP_KEY = "47IV0WOrSVTgQaCoZimdHyoQjTROgqgZ";
 
 // Bump this when the seed list changes to re-import into existing installs.
 const SEED_VERSION = "2026-06-25-katia-v2";
@@ -410,8 +413,23 @@ async function fetchQuote(ticker) {
 }
 
 async function fetch30DayRange(ticker) {
-  // 1) FONTE PRINCIPAL: Twelve Data — histórico diário real dos últimos ~30 dias.
-  //    Retorna a menor mínima e a maior máxima do período (igual ao que a corretora mostra).
+  // 1) FONTE PRINCIPAL: Financial Modeling Prep — histórico diário real com high/low de cada dia.
+  //    Pega os últimos 30 dias e retorna a menor mínima e a maior máxima (igual à corretora).
+  try {
+    const r = await fetch(
+      `https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=${ticker}&apikey=${FMP_KEY}`
+    );
+    const d = await r.json();
+    if (Array.isArray(d) && d.length) {
+      const last30 = d.slice(0, 30); // vem do mais recente para o mais antigo
+      const lows  = last30.map(x => Number(x.low)).filter(n => !isNaN(n));
+      const highs = last30.map(x => Number(x.high)).filter(n => !isNaN(n));
+      if (lows.length && highs.length) {
+        return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "fmp" };
+      }
+    }
+  } catch { /* segue para o fallback */ }
+  // 2) FALLBACK: Twelve Data (histórico diário)
   try {
     const r = await fetch(
       `https://api.twelvedata.com/time_series?symbol=${ticker}&interval=1day&outputsize=30&apikey=${TWELVE_DATA_KEY}`
@@ -423,18 +441,6 @@ async function fetch30DayRange(ticker) {
       if (lows.length && highs.length) {
         return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "twelvedata" };
       }
-    }
-  } catch { /* segue para o fallback */ }
-  // 2) FALLBACK: histórico do Finnhub (candle) — pode estar bloqueado no plano grátis
-  try {
-    const to   = Math.floor(Date.now() / 1000);
-    const from = to - 30 * 86400;
-    const r = await fetch(
-      `https://finnhub.io/api/v1/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}&token=${FINNHUB_KEY}`
-    );
-    const d = await r.json();
-    if (d.s === "ok" && d.h?.length) {
-      return { min30: Math.min(...d.l), max30: Math.max(...d.h), fetchedAt: Date.now(), source: "finnhub" };
     }
   } catch { /* segue para o último fallback */ }
   // 3) ÚLTIMO FALLBACK: máxima/mínima do dia da cotação atual (aproximação)
@@ -454,14 +460,6 @@ async function fetchNews(ticker) {
     const r = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${ticker}&from=${from}&to=${to}&token=${FINNHUB_KEY}`);
     const d = await r.json();
     return Array.isArray(d) ? d.slice(0, 12) : [];
-  } catch { return []; }
-}
-
-async function fetchEarnings(ticker) {
-  try {
-    const r = await fetch(`https://finnhub.io/api/v1/calendar/earnings?symbol=${ticker}&token=${FINNHUB_KEY}`);
-    const d = await r.json();
-    return d?.earningsCalendar || [];
   } catch { return []; }
 }
 
@@ -541,52 +539,6 @@ async function fetchDividends(ticker) {
 }
 
 // ── Claude calls ───────────────────────────────────────────────────────────
-async function runIntelligenceScan(stocks, quotesMap) {
-  const today = new Date().toLocaleDateString("pt-BR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-  const newsMap = {}; const earningsMap = {};
-  await Promise.all(stocks.map(async (s) => {
-    newsMap[s.ticker]     = await fetchNews(s.ticker);
-    earningsMap[s.ticker] = await fetchEarnings(s.ticker);
-  }));
-  const portfolioSummary = stocks.map(s => {
-    const q  = quotesMap[s.ticker];
-    const pl = q?.c ? (((q.c - s.avgPrice) / s.avgPrice) * 100).toFixed(2) : "N/A";
-    const news     = newsMap[s.ticker].slice(0, 6).map(n => `  - ${n.headline}`).join("\n");
-    const earnings = earningsMap[s.ticker].slice(0, 3).map(e =>
-      `  - Data: ${e.date} | EPS est.: ${e.epsEstimate ?? "N/A"} | Receita est.: ${e.revenueEstimate ?? "N/A"}`
-    ).join("\n");
-    return `AÇÃO: ${s.ticker} (${s.name})\nPreço atual: $${q?.c ?? "N/A"} | Preço médio pago: $${s.avgPrice} | P&L: ${pl}%\nMín 30d: $${fmt(s.min30)} | Máx 30d: $${fmt(s.max30)}\nNotícias:\n${news || "  Sem notícias"}\nEarnings:\n${earnings || "  Sem dados"}`;
-  }).join("\n\n---\n");
-
-  const prompt = `Você é um analista sênior de mercado. Hoje é ${today}.
-Analise a carteira e identifique 2-5 eventos/catalisadores por ação que podem impactar o preço nas próximas horas, dias ou semanas.
-Use as notícias fornecidas E faça buscas adicionais na web.
-Eventos: earnings, upgrades/downgrades, lançamentos, regulações (FDA/FTC), processos, macro (Fed/juros), insiders, M&A, concorrência.
-
-CARTEIRA:
-${portfolioSummary}
-
-Responda APENAS JSON válido sem markdown:
-{"scanDate":"data pt-BR","summary":"panorama geral em 3 frases","items":[{"ticker":"X","title":"título curto","type":"AMEAÇA"|"OPORTUNIDADE"|"NEUTRO"|"EVENTO","impact":"ALTO"|"MÉDIO"|"BAIXO","horizon":"HOJE"|"ESTA SEMANA"|"ESTE MÊS"|"LONGO PRAZO","detail":"2-4 frases com fatos específicos","action":"o que monitorar/fazer","source":"fonte"}]}`;
-
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6", max_tokens: 4000,
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    const data = await res.json();
-    const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
-    const result = JSON.parse(text.replace(/```json|```/g, "").trim());
-    result._rawDate = new Date().toISOString();
-    return result;
-  } catch {
-    return { scanDate: today, summary: "Erro ao processar scan.", items: [], _rawDate: new Date().toISOString() };
-  }
-}
 
 async function fetchClaudeAnalysis(stock, quote, newsHeadlines) {
   const prompt = `Analise ${stock.ticker} (${stock.name}). Preço $${quote?.c ?? "N/A"} | Var ${quote?.dp != null ? fmt(quote.dp) + "%" : "N/A"} | Médio $${fmt(stock.avgPrice)} | Qtd ${stock.qty} | Mín30d $${fmt(stock.min30)} | Máx30d $${fmt(stock.max30)}.
@@ -895,18 +847,35 @@ export default function App() {
   }, [notify]);
 
   // Refresh cotações em lotes pequenos e sequenciais, respeitando o limite gratuito.
-  // Em vez de pedir as 52 de uma vez (estoura o limite), pede de 5 em 5 com pausa.
   const refreshingRef = useRef(false);
-  const refreshAll = useCallback(async () => {
-    if (!stocks.length || refreshingRef.current) return;
+  // Refs espelham os estados para o refreshAll NÃO precisar deles como dependência
+  // (evita recriar a função e reiniciar o intervalo o tempo todo — causa do "piscar").
+  const stocksRef = useRef(stocks);
+  const alertsRef = useRef(alerts);
+  const quotesRef = useRef(quotes);
+  useEffect(() => { stocksRef.current = stocks; }, [stocks]);
+  useEffect(() => { alertsRef.current = alerts; }, [alerts]);
+  useEffect(() => { quotesRef.current = quotes; }, [quotes]);
+
+  const refreshAll = useCallback(async (scope = "all") => {
+    const stocksNow = stocksRef.current;
+    if (!stocksNow.length || refreshingRef.current) return;
     refreshingRef.current = true;
-    const qs = { ...quotes };
+    const qs = { ...quotesRef.current };
     // Ritmo seguro para o plano gratuito do Finnhub (~60 req/min):
-    // uma ação de cada vez, com pausa entre elas. Evita o erro 429.
     const PAUSE = 1100; // ~1,1s entre cada ação → no máximo ~55 consultas/min
     let usingBackup = false; // se o Finnhub cair e entrar no Twelve Data, desacelera
-    // Só atualiza ações ativas e em observação — as ARQUIVADAS são ignoradas (economiza API).
-    const toUpdate = stocks.filter(s => !s.archived);
+    // Filtra o que atualizar conforme a aba:
+    //  - "active": só ações da carteira (qtd > 0)
+    //  - "watch": só ações em observação (qtd 0)
+    //  - "all": ativas + observação (padrão). Arquivadas nunca atualizam.
+    const qtyOfLocal = (s) => Math.round((Number(s.qty) || 0) * 10000) / 10000;
+    const toUpdate = stocksNow.filter(s => {
+      if (s.archived) return false;
+      if (scope === "active") return qtyOfLocal(s) > 0;
+      if (scope === "watch")  return qtyOfLocal(s) <= 0;
+      return true;
+    });
     try {
       for (let i = 0; i < toUpdate.length; i++) {
         const s = toUpdate[i];
@@ -918,7 +887,7 @@ export default function App() {
         if (i % 5 === 4 || i === toUpdate.length - 1) {
           setQuotes({ ...qs });
           setLastUpdate(new Date());
-          checkAlerts(qs, stocks, alerts);
+          checkAlerts(qs, stocksRef.current, alertsRef.current);
         }
         // Pausa adaptativa: Finnhub aguenta ~55/min (1,1s); o backup Twelve Data só ~8/min (8s).
         const pause = usingBackup ? 8000 : PAUSE;
@@ -927,12 +896,12 @@ export default function App() {
       // Garante o estado final atualizado
       setQuotes({ ...qs });
       setLastUpdate(new Date());
-      checkAlerts(qs, stocks, alerts);
+      checkAlerts(qs, stocksRef.current, alertsRef.current);
     } finally {
       refreshingRef.current = false;
       setRefreshProgress(null);
     }
-  }, [stocks, alerts, checkAlerts, quotes]);
+  }, [checkAlerts]);
 
   // Atualiza UMA ação sob demanda (rápido, não estoura limite)
   const refreshOne = useCallback(async (ticker) => {
@@ -940,22 +909,28 @@ export default function App() {
     if (q && q.c) {
       setQuotes(p => {
         const next = { ...p, [ticker]: q };
-        checkAlerts(next, stocks, alerts);
+        checkAlerts(next, stocksRef.current, alertsRef.current);
         return next;
       });
       setLastUpdate(new Date());
     }
-  }, [stocks, alerts, checkAlerts]);
+  }, [checkAlerts]);
 
   useEffect(() => {
-    // Não roda o auto-refresh enquanto a usuária está na aba de Análise
-    // (evita que a tela recarregue e a análise desapareça).
-    if (activeTab === "analysis") return;
-    refreshAll();
-    const id = setInterval(refreshAll, 120000); // a cada 2 min (mais leve no limite gratuito)
+    // Atualização por aba (economiza API e é mais rápida):
+    //  - Carteira    → atualiza só as ações ativas (qtd > 0)
+    //  - Observando  → atualiza só as ações em observação (qtd 0)
+    //  - Demais abas → não dispara atualização automática
+    // (A aba Análise não atualiza para não recarregar a tela enquanto a usuária estuda.)
+    let scope = null;
+    if (activeTab === "portfolio") scope = "active";
+    else if (activeTab === "watchlist") scope = "watch";
+    if (!scope) return;
+    refreshAll(scope);
+    const id = setInterval(() => refreshAll(scope), 180000); // a cada 3 min
     return () => clearInterval(id);
     // eslint-disable-next-line
-  }, [stocks.length, activeTab]);
+  }, [activeTab]);
 
   // fetch 30-day range for a ticker (called when stock added/edited, and weekly refresh)
   const refresh30DayRange = useCallback(async (ticker) => {
@@ -991,30 +966,8 @@ export default function App() {
     });
   }, []); // eslint-disable-line
 
-  // Varredura de inteligência: DESATIVADA automaticamente para não sobrescrever a tela.
-  // A análise agora acontece só quando a usuária clica para analisar uma ação (sob demanda).
-  // (Antes rodava sozinha ao abrir e ficava recarregando a tela de Análise.)
-
-  const runScan = async () => {
-    if (!stocks.length) return;
-    setIntelLoading(true);
-    const qs = { ...quotes };
-    await Promise.all(stocks.map(async s => { if (!qs[s.ticker]) qs[s.ticker] = await fetchQuote(s.ticker); }));
-    const result = await runIntelligenceScan(stocks, qs);
-    const highItems = (result.items || []).filter(i => i.impact === "ALTO");
-    if (highItems.length) {
-      playAlert();
-      highItems.forEach(item => {
-        notify(
-          `${TYPE_CONFIG[item.type]?.icon || "⚠️"} ${item.ticker} — ${item.impact} IMPACTO`,
-          item.title,
-          item.type === "AMEAÇA" ? "sell" : item.type === "OPORTUNIDADE" ? "buy" : "alert"
-        );
-      });
-    }
-    setIntelligence(result);
-    setIntelLoading(false);
-  };
+  // Varredura de inteligência: removida (era código morto — desativada e sem tela que a usasse).
+  // A análise acontece sob demanda, quando a usuária clica para analisar uma ação.
 
   const analyseStock = async (stock) => {
     setLoading(p => ({ ...p, [stock.ticker]: true }));
