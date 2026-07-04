@@ -690,6 +690,9 @@ export default function App() {
   const [rangeLoading, setRangeLoading] = useState({});
   const [activeTab, setActiveTab]       = useState("portfolio");
   const [selectedStock, setSelectedStock] = useState(null);
+  const [researchTicker, setResearchTicker] = useState(""); // campo de busca da aba Análise
+  const [researchStock, setResearchStock]   = useState(null); // dados da empresa pesquisada (fora da carteira)
+  const [researching, setResearching]       = useState(false);
   const [showForm, setShowForm]           = useState(false);
   const [showAlertForm, setShowAlertForm] = useState(null);
   const [expandedIntel, setExpandedIntel] = useState(null);
@@ -911,13 +914,20 @@ export default function App() {
         const q = await fetchQuote(s.ticker);
         if (q && q.c) qs[s.ticker] = q;
         if (q && q._source === "twelvedata") usingBackup = true; // detectou uso do backup
-        setQuotes({ ...qs });
-        setLastUpdate(new Date());
-        checkAlerts(qs, stocks, alerts);
+        // Atualiza a tela só a cada 5 ações (ou na última) — evita piscar a cada ação.
+        if (i % 5 === 4 || i === toUpdate.length - 1) {
+          setQuotes({ ...qs });
+          setLastUpdate(new Date());
+          checkAlerts(qs, stocks, alerts);
+        }
         // Pausa adaptativa: Finnhub aguenta ~55/min (1,1s); o backup Twelve Data só ~8/min (8s).
         const pause = usingBackup ? 8000 : PAUSE;
         if (i < toUpdate.length - 1) await new Promise(r => setTimeout(r, pause));
       }
+      // Garante o estado final atualizado
+      setQuotes({ ...qs });
+      setLastUpdate(new Date());
+      checkAlerts(qs, stocks, alerts);
     } finally {
       refreshingRef.current = false;
       setRefreshProgress(null);
@@ -938,11 +948,14 @@ export default function App() {
   }, [stocks, alerts, checkAlerts]);
 
   useEffect(() => {
+    // Não roda o auto-refresh enquanto a usuária está na aba de Análise
+    // (evita que a tela recarregue e a análise desapareça).
+    if (activeTab === "analysis") return;
     refreshAll();
     const id = setInterval(refreshAll, 120000); // a cada 2 min (mais leve no limite gratuito)
     return () => clearInterval(id);
     // eslint-disable-next-line
-  }, [stocks.length]);
+  }, [stocks.length, activeTab]);
 
   // fetch 30-day range for a ticker (called when stock added/edited, and weekly refresh)
   const refresh30DayRange = useCallback(async (ticker) => {
@@ -978,13 +991,9 @@ export default function App() {
     });
   }, []); // eslint-disable-line
 
-  // auto-scan intelligence once per day
-  useEffect(() => {
-    if (!stocks.length) return;
-    const today = new Date().toDateString();
-    const lastScan = intelligence?._rawDate ? new Date(intelligence._rawDate).toDateString() : null;
-    if (lastScan !== today) runScan();
-  }, [stocks.length]); // eslint-disable-line
+  // Varredura de inteligência: DESATIVADA automaticamente para não sobrescrever a tela.
+  // A análise agora acontece só quando a usuária clica para analisar uma ação (sob demanda).
+  // (Antes rodava sozinha ao abrir e ficava recarregando a tela de Análise.)
 
   const runScan = async () => {
     if (!stocks.length) return;
@@ -1016,6 +1025,72 @@ export default function App() {
     setAnalyses(p => ({ ...p, [stock.ticker]: analysis }));
     setLoading(p => ({ ...p, [stock.ticker]: false }));
     setSelectedStock(stock.ticker); setActiveTab("analysis");
+  };
+
+  // Pesquisar QUALQUER empresa (mesmo fora da carteira) — traz dados de mercado + notícias + faixa 30d.
+  const doResearch = async () => {
+    const ticker = researchTicker.toUpperCase().trim();
+    if (!ticker) return;
+    setResearching(true);
+    setResearchStock(null);
+    try {
+      // 1) já tenho essa ação na carteira? então usa ela (não duplica esforço)
+      const existing = stocks.find(s => s.ticker === ticker);
+      // 2) busca cotação, notícias, perfil da empresa e faixa de 30 dias em paralelo
+      const [quote, newsData, profile, range] = await Promise.all([
+        fetchQuote(ticker),
+        fetchNews(ticker),
+        fetchProfile(ticker),
+        fetch30DayRange(ticker),
+      ]);
+      if (!quote || !quote.c) {
+        addToast(`Não encontrei dados para "${ticker}". Confira o código da ação.`, "sell");
+        setResearching(false);
+        return;
+      }
+      setQuotes(p => ({ ...p, [ticker]: quote }));
+      setNews(p => ({ ...p, [ticker]: newsData || [] }));
+      const analysis = await fetchClaudeAnalysis(
+        { ticker, name: profile?.name || ticker, avgPrice: 0, qty: 0, min30: range?.min30, max30: range?.max30 },
+        quote, (newsData || []).map(n => n.headline)
+      );
+      setAnalyses(p => ({ ...p, [ticker]: analysis }));
+      // monta o "stock pesquisado" para exibir (não está na carteira)
+      setResearchStock({
+        ticker,
+        name: profile?.name || ticker,
+        sector: profile?.sector || "",
+        min30: range?.min30 ?? null,
+        max30: range?.max30 ?? null,
+        qty: 0, avgPrice: 0,
+        _research: true,
+      });
+      setSelectedStock(ticker);
+    } catch {
+      addToast(`Erro ao pesquisar "${ticker}".`, "sell");
+    }
+    setResearching(false);
+  };
+
+  // Adicionar a empresa pesquisada à observação (watchlist)
+  const addResearchToWatchlist = () => {
+    if (!researchStock) return;
+    const t = researchStock.ticker;
+    if (stocks.find(s => s.ticker === t)) {
+      addToast(`${t} já está na sua lista.`, "info");
+      return;
+    }
+    setStocks(p => [...p, {
+      id: Date.now(), ticker: t, name: researchStock.name, assetClass: "Ação",
+      sector: researchStock.sector || "", leveraged: false, strategy: "Satélite",
+      qty: 0, avgPrice: 0, totalInvested: 0,
+      minPrice: null, maxPrice: null, min30: researchStock.min30, max30: researchStock.max30,
+      rangeManual: false, rangeAt: Date.now(),
+      paysDividends: false, dividendYield: null, dividendFrequency: null,
+      nextPayDate: null, status: "MANTER", realizedPL: 0, stopLoss: null,
+      buyDate: null, note: "", archived: false,
+    }]);
+    addToast(`${t} adicionada à Observação!`, "buy");
   };
 
   // Auto-fill company data when ticker field loses focus
@@ -1355,7 +1430,7 @@ export default function App() {
     // eslint-disable-next-line
   }, [Math.round(totals.current)]);
 
-  const selStock    = stocks.find(s => s.ticker === selectedStock);
+  const selStock    = stocks.find(s => s.ticker === selectedStock) || (researchStock && researchStock.ticker === selectedStock ? researchStock : null);
   const selAnalysis = analyses[selectedStock];
   const selNews     = news[selectedStock] || [];
   const selQuote    = quotes[selectedStock];
@@ -2046,10 +2121,32 @@ export default function App() {
 
         {/* ── ANALYSIS ── */}
         {activeTab === "analysis" && (
+          <div>
+            {/* Campo de pesquisa: estudar qualquer empresa, mesmo fora da carteira */}
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="card-label" style={{ marginBottom: 8 }}>Pesquisar empresa</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input
+                  className="form-input"
+                  style={{ flex: 1, minWidth: 180, textTransform: "uppercase" }}
+                  placeholder="Digite o código (ex: GOOGL, MSFT, KO)…"
+                  value={researchTicker}
+                  onChange={e => setResearchTicker(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") doResearch(); }}
+                />
+                <button className="btn btn-primary" onClick={doResearch} disabled={researching || !researchTicker.trim()}>
+                  {researching ? "Buscando…" : "Pesquisar"}
+                </button>
+              </div>
+              <div className="form-hint" style={{ marginTop: 6 }}>
+                Veja dados de mercado e notícias de qualquer ação para estudar antes de investir. Se gostar, pode adicionar à sua lista de observação.
+              </div>
+            </div>
+          {(
           !selectedStock || !selAnalysis ? (
             <div className="empty">
               <div className="empty-icon"><Icon name="sparkles" size={40} /></div>
-              <div>{stocks.length === 0 ? "Adicione ações primeiro." : 'Clique no ícone de análise (estrela) na carteira.'}</div>
+              <div>{stocks.length === 0 ? "Pesquise uma empresa acima ou adicione ações." : 'Pesquise acima, ou clique no ícone de análise (estrela) na carteira.'}</div>
               {stocks.length > 0 && (
                 <div style={{ marginTop: 20, display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
                   {stocks.map(s => (
@@ -2062,6 +2159,15 @@ export default function App() {
             </div>
           ) : (
             <div>
+              {/* Se a ação pesquisada NÃO está na carteira, oferece adicionar à observação */}
+              {researchStock && researchStock.ticker === selectedStock && !stocks.find(s => s.ticker === selectedStock) && (
+                <div className="card" style={{ marginBottom: 16, borderColor: "#22d3ee", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                  <div style={{ fontSize: 13, color: "#cbd5e1" }}>
+                    <strong>{researchStock.ticker}</strong> — {researchStock.name} <span style={{ color: "#7c8aa5" }}>(pesquisa, não está na sua carteira)</span>
+                  </div>
+                  <button className="btn btn-primary btn-sm" onClick={addResearchToWatchlist}><Icon name="eye" size={14} /> Adicionar à Observação</button>
+                </div>
+              )}
               <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
                 {stocks.map(s => (
                   <button key={s.id} className={`btn btn-sm ${selectedStock === s.ticker ? "btn-primary" : "btn-ghost"}`}
@@ -2108,7 +2214,7 @@ export default function App() {
                         ["Preço Médio", fmtCurrency(selStock?.avgPrice), "#94a3b8"],
                         ["Alta do Dia", selQuote?.h ? fmtCurrency(selQuote.h) : "—", "#22c55e"],
                         ["Baixa do Dia",selQuote?.l ? fmtCurrency(selQuote.l) : "—", "#ef4444"],
-                        ["P&L",         selQuote?.c ? fmtPct(((selQuote.c - selStock.avgPrice) / selStock.avgPrice) * 100) : "—", pctColor(selQuote?.c ? selQuote.c - selStock?.avgPrice : null)],
+                        ["P&L",         (selQuote?.c && selStock?.avgPrice) ? fmtPct(((selQuote.c - selStock.avgPrice) / selStock.avgPrice) * 100) : "—", pctColor(selQuote?.c && selStock?.avgPrice ? selQuote.c - selStock.avgPrice : null)],
                         ["Mín 30d",    selStock?.min30 != null ? fmtCurrency(selStock.min30) : "—", "#22c55e"],
                         ["Máx 30d",    selStock?.max30 != null ? fmtCurrency(selStock.max30) : "—", "#ef4444"],
                       ].map(([label, val, color]) => (
@@ -2142,6 +2248,8 @@ export default function App() {
               </div>
             </div>
           )
+          )}
+          </div>
         )}
 
         {/* ── DISTRIBUTION ── */}
