@@ -1531,8 +1531,8 @@ export default function App() {
         {/* HEADER */}
         <div className="header">
           <div>
-            <div className="logo" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <svg width="34" height="34" viewBox="0 0 130 130" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
+            <div className="logo" style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <svg width="52" height="52" viewBox="0 0 130 130" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
                 <defs>
                   <linearGradient id="seedisGrad" x1="0" y1="1" x2="1" y2="0">
                     <stop offset="0" stopColor="#16a34a"/>
@@ -1549,7 +1549,7 @@ export default function App() {
                 <path d="M76,54 C76,30 94,16 116,16 C116,40 98,54 76,54 Z" fill="url(#seedisLeaf)"/>
                 <path d="M76,68 C76,50 60,38 42,38 C42,56 58,68 76,68 Z" fill="#34d399"/>
               </svg>
-              <span style={{ fontWeight: 800, letterSpacing: "-0.5px" }}>seedis</span>
+              <span style={{ fontWeight: 800, letterSpacing: "-0.5px", fontSize: "34px" }}>seedis</span>
             </div>
             <div className="sub">Invista · Cresça · Portfólio · Alertas</div>
           </div>
