@@ -737,35 +737,104 @@ export default function App() {
   };
 
   // Exporta a carteira para CSV (abre no Excel / Google Sheets)
-  const exportCSV = () => {
-    const cols = ["Ticker","Nome","Classe","Setor","Estrategia","Orientacao","Quantidade","PrecoMedio","TotalInvestido","CotacaoAtual","ValorAtual","LucroPrejuizo","RentabilidadePct","PagaDividendos","DividendYield","StopLoss","DataCompra","Nota"];
-    // Arredonda valores monetários para 2 casas (ex: 699.11) — número limpo e calculável no Excel
-    const money = (v) => (v === "" || v == null || isNaN(v)) ? "" : Number(v).toFixed(2);
-    const rows = stocks.map(s => {
-      const q = quotes[s.ticker];
-      const cur = q?.c ? s.qty * q.c : "";
-      const inv = s.totalInvested ?? s.qty * s.avgPrice;
-      const pl = q?.c ? (s.qty * q.c - inv) : "";
-      const plPct = q?.c && inv ? (((s.qty * q.c - inv) / inv) * 100).toFixed(2) : "";
-      const esc = (v) => {
-        const str = v == null ? "" : String(v);
-        return /[",;\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-      };
-      return [
-        s.ticker, s.name, s.assetClass || "Ação", s.sector || "", s.strategy || "", s.status || "",
-        Number(s.qty), money(s.avgPrice), money(inv), money(q?.c ?? ""), money(cur), money(pl), plPct,
-        s.paysDividends ? "Sim" : "Não", s.dividendYield ?? "", money(s.stopLoss ?? ""), s.buyDate ?? "", s.note ?? "",
-      ].map(esc).join(";");
-    });
-    const csv = "\uFEFF" + [cols.join(";"), ...rows].join("\n"); // BOM p/ acentos no Excel
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `seedis-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    addToast("✅ CSV exportado! Abra no Excel ou Google Sheets.", "buy");
+  // Carrega o SheetJS (gerador de Excel) do CDN só quando precisar
+  const loadSheetJS = () => new Promise((resolve, reject) => {
+    if (window.XLSX) return resolve(window.XLSX);
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.onload = () => resolve(window.XLSX);
+    script.onerror = () => reject(new Error("Falha ao carregar o gerador de Excel"));
+    document.head.appendChild(script);
+  });
+
+  const exportCSV = async () => {
+    let XLSX;
+    try {
+      XLSX = await loadSheetJS();
+    } catch {
+      addToast("Não consegui carregar o gerador de Excel. Verifique sua conexão.", "sell");
+      return;
+    }
+
+    const qtyOf = (s) => Number(s.qty) || 0;
+    const invOf = (s) => s.totalInvested != null ? Number(s.totalInvested) : qtyOf(s) * (Number(s.avgPrice) || 0);
+
+    // Separa e ordena
+    const ativas = stocks.filter(s => !s.archived && qtyOf(s) > 0).sort((a, b) => invOf(b) - invOf(a));
+    const observando = stocks.filter(s => !s.archived && qtyOf(s) <= 0).sort((a, b) => a.ticker.localeCompare(b.ticker));
+    const arquivadas = stocks.filter(s => s.archived).sort((a, b) => a.ticker.localeCompare(b.ticker));
+
+    const header = ["Ativo", "Nome", "Setor", "Estratégia", "Orientação", "Quantidade",
+                    "Preço Médio", "Total Investido", "Paga Div.", "Yield", "Freq. Div."];
+
+    // Monta as linhas como matriz (Array of Arrays) para controlar formato célula a célula
+    const aoa = [];
+    aoa.push(["SEEDIS — Relatório da Carteira"]);
+    aoa.push([`Exportado em ${new Date().toISOString().slice(0, 10)}  ·  Valores em dólar (US$)`]);
+    aoa.push([]);
+
+    const rowMeta = []; // guarda o tipo de cada linha para formatar depois
+    const pushRow = (arr, meta) => { aoa.push(arr); rowMeta.push(meta); };
+
+    // preenche cabeçalho + seções
+    const buildStockRow = (s) => [
+      s.ticker, s.name || "", s.sector || "", s.strategy || "", s.status || "",
+      qtyOf(s), Number(s.avgPrice) || 0, invOf(s),
+      s.paysDividends ? "Sim" : "Não",
+      (s.dividendYield != null ? Number(s.dividendYield) / 100 : ""),
+      s.dividendFrequency || "",
+    ];
+
+    // rowMeta alinhado com aoa a partir da linha 4 (índice 3)
+    while (rowMeta.length < aoa.length) rowMeta.push("skip");
+
+    const addSection = (title, list, withTotal) => {
+      pushRow([title], "section");
+      pushRow(header, "header");
+      const startExcelRow = aoa.length; // 1-based já que aoa vai virar linhas
+      list.forEach(s => pushRow(buildStockRow(s), "data"));
+      if (withTotal) {
+        const first = startExcelRow + 1; // +1 porque Excel é 1-based
+        const last = aoa.length;
+        pushRow(["TOTAL CARTEIRA", "", "", "", "", "", "", { f: `SUM(H${first}:H${last})` }, "", "", ""], "total");
+      }
+      pushRow([], "skip");
+    };
+
+    addSection(`CARTEIRA — Ações Ativas (${ativas.length})`, ativas, true);
+    if (observando.length) addSection(`OBSERVANDO (${observando.length})`, observando, false);
+    if (arquivadas.length) addSection(`ARQUIVADAS (${arquivadas.length})`, arquivadas, false);
+
+    // Cria a planilha
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+    // Larguras das colunas
+    ws["!cols"] = [
+      { wch: 8 }, { wch: 32 }, { wch: 24 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 15 }, { wch: 10 }, { wch: 9 }, { wch: 12 },
+    ];
+
+    // Aplica formatos: percorre as células e formata moeda (G,H) e porcentagem (J)
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    for (let R = range.s.r; R <= range.e.r; R++) {
+      const meta = rowMeta[R] || "skip";
+      if (meta === "data" || meta === "total") {
+        // G (col 6) preço médio, H (col 7) total investido → moeda
+        [6, 7].forEach(C => {
+          const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+          if (cell && typeof cell.v === "number") cell.z = '"$"#,##0.00';
+          if (cell && cell.f) cell.z = '"$"#,##0.00';
+        });
+        // J (col 9) yield → porcentagem
+        const y = ws[XLSX.utils.encode_cell({ r: R, c: 9 })];
+        if (y && typeof y.v === "number") y.z = "0.00%";
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Carteira Seedis");
+    XLSX.writeFile(wb, `seedis-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    addToast("✅ Relatório Excel exportado! Valores em dólar, prontos para somar.", "buy");
   };
 
   const importInputRef = useRef(null);
@@ -1574,7 +1643,7 @@ export default function App() {
                   <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 50, background: "#0f1623", border: "1px solid #1c2740", borderRadius: 12, padding: 6, minWidth: 210, boxShadow: "0 12px 32px rgba(0,0,0,.5)" }}>
                     {[
                       ["refresh", "Atualizar cotações", () => { refreshAll(); setShowSettings(false); }],
-                      ["spreadsheet", "Exportar (Excel/CSV)", () => { exportCSV(); setShowSettings(false); }],
+                      ["spreadsheet", "Exportar relatório (Excel)", () => { exportCSV(); setShowSettings(false); }],
                       ["download", "Fazer backup", () => { exportData(); setShowSettings(false); }],
                       ["upload", "Restaurar backup", () => { importInputRef.current?.click(); setShowSettings(false); }],
                       ["gear", "Perfil da carteira", () => { setShowProfile(true); setShowSettings(false); }],
