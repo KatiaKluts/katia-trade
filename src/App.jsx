@@ -3118,7 +3118,13 @@ export default function App() {
                         background: txForm.type===v ? (v==="COMPRA"?"#052e16":v==="VENDA"?"#2d0a0a":"#04252e") : "#080b10",
                         color: txForm.type===v ? (v==="COMPRA"?"#4ade80":v==="VENDA"?"#f87171":"#22d3ee") : "#64748b",
                         cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "'IBM Plex Sans',sans-serif" }}
-                      onClick={() => setTxForm(p => ({ ...p, type: v }))}>
+                      onClick={() => setTxForm(p => {
+                        // Ao mudar para VENDA/DIVIDENDO, se a ação escolhida não tem posição, limpa a seleção
+                        // (ela não aparece mais na lista filtrada, evita ficar "presa").
+                        const stk = stocks.find(s => s.ticker === p.ticker);
+                        const perdeSelecao = v !== "COMPRA" && stk && !(Number(stk.qty) > 0);
+                        return { ...p, type: v, ticker: perdeSelecao ? "" : p.ticker };
+                      })}>
                       {v === "COMPRA" ? "▲ Compra" : v === "VENDA" ? "▼ Venda" : "◆ Dividendo"}
                     </button>
                   ))}
@@ -3142,7 +3148,14 @@ export default function App() {
                     }));
                   }}>
                   <option value="">Selecione uma ação cadastrada…</option>
-                  {[...stocks].sort((a, b) => a.ticker.localeCompare(b.ticker)).map(s => (
+                  {[...stocks]
+                    .filter(s => {
+                      // COMPRA: mostra todas (inclusive observação, pois você observa p/ comprar).
+                      // VENDA e DIVIDENDO: só as que você tem posição (qtd > 0).
+                      if (txForm.type === "COMPRA") return !s.archived;
+                      return !s.archived && Number(s.qty) > 0;
+                    })
+                    .sort((a, b) => a.ticker.localeCompare(b.ticker)).map(s => (
                     <option key={s.id} value={s.ticker}>
                       {s.ticker} — {s.name}{Number(s.qty) > 0 ? ` (tem ${s.qty})` : " (observando)"}
                     </option>
