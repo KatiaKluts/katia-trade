@@ -45,8 +45,10 @@ function Icon({ name, size = 18, style, className }) {
 const FINNHUB_KEY = "d9377dpr01qq79pbeu20d9377dpr01qq79pbeu2g";
 // Twelve Data: usado como backup de cotação quando o Finnhub falha. Plano grátis: 8 req/min.
 const TWELVE_DATA_KEY = "d6d185bf6730430fa9a2cbd1854b7535";
-// Financial Modeling Prep (FMP): histórico diário de 30 dias (mín/máx reais, iguais à corretora).
-// Plano grátis: 250 req/dia. Traz open/high/low/close de cada dia.
+// Tiingo: FONTE PRINCIPAL do histórico de 30 dias (mín/máx reais, iguais à corretora).
+// Cobre ações US e ADRs (NOC, ITUB, etc.). Plano grátis: até 50 símbolos/hora — suficiente p/ 1x ao dia.
+const TIINGO_KEY = "64845bd8cc7c6675628612b2b2eb9ff151e31053";
+// Financial Modeling Prep (FMP): reserva do histórico de 30 dias (cobre menos ações).
 const FMP_KEY = "47IV0WOrSVTgQaCoZimdHyoQjTROgqgZ";
 
 // Bump this when the seed list changes to re-import into existing installs.
@@ -413,23 +415,38 @@ async function fetchQuote(ticker) {
 }
 
 async function fetch30DayRange(ticker) {
-  // 1) FONTE PRINCIPAL: Financial Modeling Prep — histórico diário real com high/low de cada dia.
-  //    Pega os últimos 30 dias e retorna a menor mínima e a maior máxima (igual à corretora).
+  // 1) FONTE PRINCIPAL: Tiingo — histórico diário real com high/low de cada dia.
+  //    Cobre ações US e ADRs (NOC, ITUB, etc.). Retorna a menor mínima e a maior máxima dos ~30 dias.
+  try {
+    const start = new Date(Date.now() - 32 * 86400000).toISOString().slice(0, 10); // ~32 dias atrás
+    const r = await fetch(
+      `https://api.tiingo.com/tiingo/daily/${ticker}/prices?startDate=${start}&token=${TIINGO_KEY}`
+    );
+    const d = await r.json();
+    if (Array.isArray(d) && d.length) {
+      const lows  = d.map(x => Number(x.low)).filter(n => !isNaN(n));
+      const highs = d.map(x => Number(x.high)).filter(n => !isNaN(n));
+      if (lows.length && highs.length) {
+        return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "tiingo" };
+      }
+    }
+  } catch { /* segue para a reserva */ }
+  // 2) RESERVA: Financial Modeling Prep (cobre menos ações)
   try {
     const r = await fetch(
       `https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=${ticker}&apikey=${FMP_KEY}`
     );
     const d = await r.json();
     if (Array.isArray(d) && d.length) {
-      const last30 = d.slice(0, 30); // vem do mais recente para o mais antigo
+      const last30 = d.slice(0, 30);
       const lows  = last30.map(x => Number(x.low)).filter(n => !isNaN(n));
       const highs = last30.map(x => Number(x.high)).filter(n => !isNaN(n));
       if (lows.length && highs.length) {
         return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "fmp" };
       }
     }
-  } catch { /* segue para o fallback */ }
-  // 2) FALLBACK: Twelve Data (histórico diário)
+  } catch { /* segue para a próxima reserva */ }
+  // 3) RESERVA 2: Twelve Data (histórico diário)
   try {
     const r = await fetch(
       `https://api.twelvedata.com/time_series?symbol=${ticker}&interval=1day&outputsize=30&apikey=${TWELVE_DATA_KEY}`
@@ -442,8 +459,8 @@ async function fetch30DayRange(ticker) {
         return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "twelvedata" };
       }
     }
-  } catch { /* segue para o último fallback */ }
-  // 3) ÚLTIMO FALLBACK: máxima/mínima do dia da cotação atual (aproximação)
+  } catch { /* segue para o último recurso */ }
+  // 4) ÚLTIMO RECURSO: máxima/mínima do dia da cotação atual (aproximação)
   try {
     const q = await fetchQuote(ticker);
     if (q && q.h && q.l) {
