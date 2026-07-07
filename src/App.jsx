@@ -216,15 +216,15 @@ const SIGNAL_CONFIG = {
   ACUMULAR:  { bg: "#0c1a2e", border: "#3b82f6", text: "#60a5fa", icon: "●" },
 };
 const IMPACT_CONFIG = {
-  ALTO:  { color: "#ef4444", bg: "#2d0a0a", border: "#7f1d1d", dot: "🔴" },
-  MÉDIO: { color: "#f59e0b", bg: "#1c1200", border: "#78350f", dot: "🟡" },
-  BAIXO: { color: "#60a5fa", bg: "#0c1a2e", border: "#1e3a5f", dot: "🔵" },
+  ALTO:  { color: "#ef4444", bg: "#2d0a0a", border: "#7f1d1d", dot: "●" },
+  MÉDIO: { color: "#f59e0b", bg: "#1c1200", border: "#78350f", dot: "●" },
+  BAIXO: { color: "#60a5fa", bg: "#0c1a2e", border: "#1e3a5f", dot: "●" },
 };
 const TYPE_CONFIG = {
-  AMEAÇA:       { icon: "⚠️", color: "#ef4444", bg: "#1a0404" },
-  OPORTUNIDADE: { icon: "✅", color: "#4ade80", bg: "#021a0a" },
+  AMEAÇA:       { icon: "!", color: "#ef4444", bg: "#1a0404" },
+  OPORTUNIDADE: { icon: "▲", color: "#4ade80", bg: "#021a0a" },
   NEUTRO:       { icon: "ℹ️", color: "#94a3b8", bg: "#0d1117" },
-  EVENTO:       { icon: "📅", color: "#a78bfa", bg: "#13001a" },
+  EVENTO:       { icon: "◆", color: "#a78bfa", bg: "#13001a" },
 };
 
 // Cores por orientação (status) — usadas no agrupamento da carteira
@@ -733,7 +733,7 @@ export default function App() {
     a.download = `seedis-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    addToast("✅ Backup baixado! Guarde o arquivo em local seguro.", "buy");
+    addToast("Backup baixado. Guarde o arquivo em local seguro.", "buy");
   };
 
   // Exporta a carteira para CSV (abre no Excel / Google Sheets)
@@ -834,7 +834,7 @@ export default function App() {
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Carteira Seedis");
     XLSX.writeFile(wb, `seedis-${new Date().toISOString().slice(0, 10)}.xlsx`);
-    addToast("✅ Relatório Excel exportado! Valores em dólar, prontos para somar.", "buy");
+    addToast("Relatório Excel exportado. Valores em dólar, prontos para somar.", "buy");
   };
 
   const importInputRef = useRef(null);
@@ -850,9 +850,9 @@ export default function App() {
         setStocks(data.stocks);
         setAlerts(data.alerts || {});
         if (data.transactions) setTransactions(data.transactions);
-        addToast(`✅ Backup restaurado: ${data.stocks.length} ações`, "buy");
+        addToast(`Backup restaurado: ${data.stocks.length} ações`, "buy");
       } catch (err) {
-        addToast("❌ Arquivo inválido. Use um backup gerado pelo próprio app.", "sell");
+        addToast("Arquivo inválido. Use um backup gerado pelo próprio app.", "sell");
       }
     };
     reader.readAsText(file);
@@ -863,11 +863,11 @@ export default function App() {
     const perm = await requestNotificationPermission();
     setNotifPerm(perm);
     if (perm === "granted") {
-      addToast("✅ Notificações ativadas! Você será avisada mesmo com a aba fechada.", "buy");
+      addToast("Notificações ativadas. Você será avisada mesmo com a aba fechada.", "buy");
       // register SW if not yet done
       if (!swRegRef.current) swRegRef.current = await registerServiceWorker();
     } else if (perm === "denied") {
-      addToast("❌ Notificações bloqueadas. Habilite nas configurações do navegador.", "sell");
+      addToast("Notificações bloqueadas. Habilite nas configurações do navegador.", "sell");
     }
   };
 
@@ -894,13 +894,13 @@ export default function App() {
       const ks = `${s.ticker}_sell`; const kb = `${s.ticker}_buy`;
       if (a?.active && a.sellTarget && price >= Number(a.sellTarget) && !firedRef.current[ks]) {
         firedRef.current[ks] = true;
-        notify(`🔴 VENDER — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu alvo de venda ${fmtCurrency(a.sellTarget)}`, "sell");
+        notify(`▼ VENDER — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu alvo de venda ${fmtCurrency(a.sellTarget)}`, "sell");
         setAlertLog(p => [{ id: Date.now(), ticker: s.ticker, type: "VENDA", price, target: a.sellTarget, time: new Date() }, ...p.slice(0, 49)]);
       }
       if (a?.sellTarget && price < Number(a.sellTarget) * 0.999) firedRef.current[ks] = false;
       if (a?.active && a.buyTarget && price <= Number(a.buyTarget) && !firedRef.current[kb]) {
         firedRef.current[kb] = true;
-        notify(`🟢 COMPRAR — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu piso de compra ${fmtCurrency(a.buyTarget)}`, "buy");
+        notify(`▲ COMPRAR — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu piso de compra ${fmtCurrency(a.buyTarget)}`, "buy");
         setAlertLog(p => [{ id: Date.now(), ticker: s.ticker, type: "COMPRA", price, target: a.buyTarget, time: new Date() }, ...p.slice(0, 49)]);
       }
       if (a?.buyTarget && price > Number(a.buyTarget) * 1.001) firedRef.current[kb] = false;
@@ -908,7 +908,7 @@ export default function App() {
       const kstop = `${s.ticker}_stop`;
       if (s.stopLoss && Number(s.qty) > 0 && price <= Number(s.stopLoss) && !firedRef.current[kstop]) {
         firedRef.current[kstop] = true;
-        notify(`🛑 STOP-LOSS — ${s.ticker}`, `Preço ${fmtCurrency(price)} caiu até seu stop ${fmtCurrency(s.stopLoss)}. Reavalie a posição.`, "sell");
+        notify(`▼ STOP-LOSS — ${s.ticker}`, `Preço ${fmtCurrency(price)} caiu até seu stop ${fmtCurrency(s.stopLoss)}. Reavalie a posição.`, "sell");
         setAlertLog(p => [{ id: Date.now(), ticker: s.ticker, type: "STOP", price, target: s.stopLoss, time: new Date() }, ...p.slice(0, 49)]);
       }
       if (s.stopLoss && price > Number(s.stopLoss) * 1.001) firedRef.current[kstop] = false;
@@ -1289,7 +1289,7 @@ export default function App() {
       }
       setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" });
       setShowTxForm(false);
-      addToast(`💰 Dividendo de ${fmtCurrency(valor)} da ${tickerDiv} registrado!`, "buy");
+      addToast(`◆ Dividendo de ${fmtCurrency(valor)} da ${tickerDiv} registrado.`, "buy");
       return;
     }
 
@@ -1389,10 +1389,10 @@ export default function App() {
     if (tx.type === "VENDA" && lastSellResultRef.current) {
       const { ticker, gain, soldAll, semCusto } = lastSellResultRef.current;
       if (semCusto) {
-        addToast(`⚠️ Venda de ${ticker} registrada, mas sem preço médio de compra cadastrado — o lucro/prejuízo NÃO foi calculado. Edite a ação e informe o preço médio para o cálculo ficar correto.`, "sell");
+        addToast(`Atenção: Venda de ${ticker} registrada, mas sem preço médio de compra cadastrado — o lucro/prejuízo NÃO foi calculado. Edite a ação e informe o preço médio para o cálculo ficar correto.`, "sell");
       } else {
         const gainTxt = gain >= 0 ? `lucro de ${fmtCurrency(gain)}` : `prejuízo de ${fmtCurrency(Math.abs(gain))}`;
-        addToast(`${gain >= 0 ? "📈" : "📉"} Venda de ${ticker} registrada — ${gainTxt} realizado.${soldAll ? " Posição zerada (agora em 👀 Observando)." : ""}`, gain >= 0 ? "buy" : "sell");
+        addToast(`${gain >= 0 ? "▲" : "▼"} Venda de ${ticker} registrada — ${gainTxt} realizado.${soldAll ? " Posição zerada (agora em Observando)." : ""}`, gain >= 0 ? "buy" : "sell");
       }
       lastSellResultRef.current = null;
     }
@@ -1971,7 +1971,7 @@ export default function App() {
                         <td>
                           <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 3, fontFamily: "'IBM Plex Mono',monospace",
                             background: tipoBg, color: tipoColor }}>
-                            {t.type === "DIVIDENDO" ? "💰 DIV" : t.type}
+                            {t.type === "DIVIDENDO" ? "◆ DIV" : t.type}
                           </span>
                         </td>
                         <td className="ticker-cell">{t.ticker}</td>
@@ -3119,7 +3119,7 @@ export default function App() {
                         color: txForm.type===v ? (v==="COMPRA"?"#4ade80":v==="VENDA"?"#f87171":"#22d3ee") : "#64748b",
                         cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "'IBM Plex Sans',sans-serif" }}
                       onClick={() => setTxForm(p => ({ ...p, type: v }))}>
-                      {v === "COMPRA" ? "▲ Compra" : v === "VENDA" ? "▼ Venda" : "💰 Dividendo"}
+                      {v === "COMPRA" ? "▲ Compra" : v === "VENDA" ? "▼ Venda" : "◆ Dividendo"}
                     </button>
                   ))}
                 </div>
