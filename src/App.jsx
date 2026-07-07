@@ -2623,7 +2623,7 @@ export default function App() {
               <div className="card-label" style={{ marginBottom: 6 }}>Observando — {watchStocks.length} {watchStocks.length === 1 ? "ativo" : "ativos"} (sem posição)</div>
               <div className="form-hint" style={{ marginBottom: 14 }}>Ações que você acompanha para avaliar a compra. Não entram nos cálculos da carteira.</div>
               <table className="table">
-                <thead><tr><th>Ativo</th><th>Cotação</th><th>Hoje</th><th>Alvo compra</th><th>Minha tese</th><th></th></tr></thead>
+                <thead><tr><th>Ativo</th><th>Cotação</th><th>Hoje</th><th>Mín/Máx 30d</th><th>Alvo compra</th><th>Minha tese</th><th></th></tr></thead>
                 <tbody>
                   {watchStocks.map(s => {
                     const q = quotes[s.ticker];
@@ -2644,6 +2644,34 @@ export default function App() {
                         </td>
                         <td className="mono" style={{ color: q?.c ? "#f8fafc" : "#475569" }}>{q?.c ? fmtCurrency(q.c) : "…"}</td>
                         <td className="mono" style={{ color: pctColor(q?.dp) }}>{q?.dp != null ? fmtPct(q.dp) : "—"}</td>
+                        <td style={{ minWidth: 150 }}>
+                          {s.min30 != null && s.max30 != null ? (() => {
+                            const wpos = (q?.c && s.max30 !== s.min30)
+                              ? Math.min(100, Math.max(0, ((q.c - s.min30) / (s.max30 - s.min30)) * 100))
+                              : null;
+                            return (
+                              <div className="range-cell">
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 10 }}>
+                                  <span style={{ color: "#22c55e" }}>{fmtCurrency(s.min30)}</span>
+                                  <span style={{ color: "#ef4444" }}>{fmtCurrency(s.max30)}</span>
+                                </div>
+                                <div className="range-bar-wrap">
+                                  <div className="range-bar-fill" style={{ width: "100%" }} />
+                                  {wpos != null && (
+                                    <div className="range-dot" style={{ left: `${wpos}%` }} title={`Cotação atual: ${fmtCurrency(q?.c)}`} />
+                                  )}
+                                </div>
+                                {wpos != null && (
+                                  <div style={{ fontSize: 9.5, color: wpos < 25 ? "#4ade80" : "#64748b", marginTop: 3, textAlign: "center" }}>
+                                    {wpos < 25 ? "perto da mínima — bom p/ comprar" : wpos > 75 ? "perto da máxima" : "no meio do range"}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })() : (
+                            <button className="btn btn-ghost btn-sm" onClick={() => refresh30DayRange(s.ticker)} style={{ fontSize: 10 }}>buscar 30d</button>
+                          )}
+                        </td>
                         <td className="mono" style={{ color: "#4ade80" }}>{a?.buyTarget ? fmtCurrency(a.buyTarget) : (s.minPrice ? fmtCurrency(s.minPrice) : "—")}</td>
                         <td style={{ fontSize: 11, color: "#94a3b8", fontStyle: "italic", maxWidth: 220 }}>{s.note || "—"}</td>
                         <td>
