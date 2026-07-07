@@ -1264,6 +1264,35 @@ export default function App() {
 
   // ── Transações (fundação para rentabilidade real) ──
   const saveTransaction = () => {
+    // DIVIDENDO: registro simples — só ticker, valor recebido e data (sem qtd/preço).
+    if (txForm.type === "DIVIDENDO") {
+      const valor = Number(txForm.total);
+      const tickerDiv = txForm.ticker.toUpperCase().trim();
+      if (!tickerDiv || !valor) return;
+      const divTx = {
+        id: Date.now(),
+        ticker: tickerDiv,
+        type: "DIVIDENDO",
+        qty: 0,
+        price: 0,
+        total: valor,
+        date: txForm.date,
+        fees: 0,
+      };
+      const editingIdDiv = txForm._editingId || null;
+      if (editingIdDiv) {
+        const newList = [divTx, ...transactions.filter(t => t.id !== editingIdDiv)]
+          .sort((a, b) => new Date(b.date) - new Date(a.date));
+        setTransactions(newList);
+      } else {
+        setTransactions(p => [divTx, ...p].sort((a, b) => new Date(b.date) - new Date(a.date)));
+      }
+      setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" });
+      setShowTxForm(false);
+      addToast(`💰 Dividendo de ${fmtCurrency(valor)} da ${tickerDiv} registrado!`, "buy");
+      return;
+    }
+
     const qtyNum = Number(txForm.qty);
     const totalNum = Number(txForm.total);
     // O valor total é o que a usuária digita (vem do extrato); o preço por ação é derivado.
@@ -1796,6 +1825,58 @@ export default function App() {
                         </div>
                       ))}
                     </div>
+
+                    {/* DIVIDENDOS RECEBIDOS + TOTAL GERAL */}
+                    {(() => {
+                      const divTx = transactions.filter(t => t.type === "DIVIDENDO");
+                      const totalDiv = divTx.reduce((acc, t) => acc + Number(t.total || 0), 0);
+                      const totalGeral = totalRealized + totalDiv;
+                      // agrupa dividendos por ação
+                      const porAcao = {};
+                      divTx.forEach(t => { porAcao[t.ticker] = (porAcao[t.ticker] || 0) + Number(t.total || 0); });
+                      const ranking = Object.entries(porAcao).sort((a, b) => b[1] - a[1]);
+                      // total no ano corrente
+                      const anoAtual = new Date().getFullYear();
+                      const totalAno = divTx.filter(t => new Date(t.date).getFullYear() === anoAtual)
+                        .reduce((acc, t) => acc + Number(t.total || 0), 0);
+                      return (
+                        <>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+                            <div className="card">
+                              <div className="card-label">Dividendos Recebidos (total)</div>
+                              <div className="card-val" style={{ color: "#22d3ee", fontSize: 20 }}>{fmtCurrency(totalDiv)}</div>
+                            </div>
+                            <div className="card">
+                              <div className="card-label">Dividendos em {anoAtual}</div>
+                              <div className="card-val" style={{ color: "#22d3ee", fontSize: 20 }}>{fmtCurrency(totalAno)}</div>
+                            </div>
+                            <div className="card" style={{ border: "1px solid #1e3327", background: "linear-gradient(160deg,#0f1f18,#0e1b14)" }}>
+                              <div className="card-label">Resultado Total (vendas + dividendos)</div>
+                              <div className="card-val" style={{ color: totalGeral >= 0 ? "#4ade80" : "#f87171", fontSize: 20 }}>{fmtCurrency(totalGeral)}</div>
+                            </div>
+                          </div>
+                          {ranking.length > 0 && (
+                            <div className="card">
+                              <div className="card-label" style={{ marginBottom: 14 }}>Dividendos Recebidos por Ação</div>
+                              <table className="table">
+                                <thead><tr><th>Ativo</th><th>Total recebido</th></tr></thead>
+                                <tbody>
+                                  {ranking.map(([tk, val]) => (
+                                    <tr key={tk}>
+                                      <td className="ticker-cell">{tk}</td>
+                                      <td className="mono" style={{ color: "#22d3ee" }}>{fmtCurrency(val)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                              <div className="form-hint" style={{ marginTop: 10 }}>
+                                Registre os dividendos que você recebeu na aba Transações (botão "Registrar", tipo Dividendo).
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                     {withResults.length > 0 && (
                       <div className="card">
                         <div className="card-label" style={{ marginBottom: 14 }}>Histórico de Lucro/Prejuízo por Ação (vendas já realizadas)</div>
@@ -1867,7 +1948,7 @@ export default function App() {
                 {transactions.length} {transactions.length === 1 ? "transação registrada" : "transações registradas"}
               </div>
               <button className="btn btn-primary btn-sm" onClick={() => { setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" }); setShowTxForm(true); }}>
-                + Registrar Compra/Venda
+                + Registrar Compra/Venda/Dividendo
               </button>
             </div>
             {transactions.length === 0 ? (
@@ -1880,21 +1961,24 @@ export default function App() {
                 <thead><tr><th>Data</th><th>Tipo</th><th>Ativo</th><th>Qtd</th><th>Preço</th><th>Taxas</th><th>Total</th><th></th></tr></thead>
                 <tbody>
                   {transactions.map(t => {
-                    const total = t.qty * t.price + (t.type === "COMPRA" ? t.fees : -t.fees);
+                    const total = t.type === "DIVIDENDO" ? Number(t.total) : t.qty * t.price + (t.type === "COMPRA" ? t.fees : -t.fees);
+                    const tipoBg = t.type === "COMPRA" ? "#052e16" : t.type === "VENDA" ? "#2d0a0a" : "#04252e";
+                    const tipoColor = t.type === "COMPRA" ? "#4ade80" : t.type === "VENDA" ? "#f87171" : "#22d3ee";
+                    const totalColor = t.type === "COMPRA" ? "#f87171" : t.type === "VENDA" ? "#4ade80" : "#22d3ee";
                     return (
                       <tr key={t.id}>
                         <td className="mono" style={{ fontSize: 12 }}>{fmtDate(t.date)}</td>
                         <td>
                           <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 3, fontFamily: "'IBM Plex Mono',monospace",
-                            background: t.type === "COMPRA" ? "#052e16" : "#2d0a0a", color: t.type === "COMPRA" ? "#4ade80" : "#f87171" }}>
-                            {t.type}
+                            background: tipoBg, color: tipoColor }}>
+                            {t.type === "DIVIDENDO" ? "💰 DIV" : t.type}
                           </span>
                         </td>
                         <td className="ticker-cell">{t.ticker}</td>
-                        <td className="mono">{t.qty}</td>
-                        <td className="mono">{fmtCurrency(t.price)}</td>
+                        <td className="mono">{t.type === "DIVIDENDO" ? "—" : t.qty}</td>
+                        <td className="mono">{t.type === "DIVIDENDO" ? "—" : fmtCurrency(t.price)}</td>
                         <td className="mono" style={{ color: "#64748b" }}>{t.fees ? fmtCurrency(t.fees) : "—"}</td>
-                        <td className="mono" style={{ color: t.type === "COMPRA" ? "#f87171" : "#4ade80" }}>{fmtCurrency(total)}</td>
+                        <td className="mono" style={{ color: totalColor }}>{fmtCurrency(total)}</td>
                         <td>
                           <div style={{ display: "flex", gap: 6 }}>
                             <button className="btn btn-ghost btn-sm" title="Editar transação" onClick={() => {
@@ -3027,15 +3111,15 @@ export default function App() {
               <div className="form-group form-full">
                 <label className="form-label">Tipo</label>
                 <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                  {["COMPRA","VENDA"].map(v => (
+                  {["COMPRA","VENDA","DIVIDENDO"].map(v => (
                     <button key={v} type="button"
                       style={{ flex: 1, padding: "10px", borderRadius: 5,
-                        border: `1px solid ${txForm.type===v ? (v==="COMPRA"?"#16a34a":"#dc2626") : "#1e293b"}`,
-                        background: txForm.type===v ? (v==="COMPRA"?"#052e16":"#2d0a0a") : "#080b10",
-                        color: txForm.type===v ? (v==="COMPRA"?"#4ade80":"#f87171") : "#64748b",
-                        cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "'IBM Plex Sans',sans-serif" }}
+                        border: `1px solid ${txForm.type===v ? (v==="COMPRA"?"#16a34a":v==="VENDA"?"#dc2626":"#0891b2") : "#1e293b"}`,
+                        background: txForm.type===v ? (v==="COMPRA"?"#052e16":v==="VENDA"?"#2d0a0a":"#04252e") : "#080b10",
+                        color: txForm.type===v ? (v==="COMPRA"?"#4ade80":v==="VENDA"?"#f87171":"#22d3ee") : "#64748b",
+                        cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "'IBM Plex Sans',sans-serif" }}
                       onClick={() => setTxForm(p => ({ ...p, type: v }))}>
-                      {v === "COMPRA" ? "▲ Compra" : "▼ Venda"}
+                      {v === "COMPRA" ? "▲ Compra" : v === "VENDA" ? "▼ Venda" : "💰 Dividendo"}
                     </button>
                   ))}
                 </div>
@@ -3089,6 +3173,7 @@ export default function App() {
                   );
                 })()}
               </div>
+              {txForm.type !== "DIVIDENDO" && (
               <div className="form-group">
                 <label className="form-label">Quantidade</label>
                 <input className="form-input" type="number" step="0.0001" placeholder="10" value={txForm.qty}
@@ -3104,11 +3189,12 @@ export default function App() {
                   );
                 })()}
               </div>
+              )}
               <div className="form-group">
-                <label className="form-label">Valor total da operação ($)</label>
-                <input className="form-input" type="number" step="0.01" placeholder="Ex: 660.03" value={txForm.total}
+                <label className="form-label">{txForm.type === "DIVIDENDO" ? "Valor recebido ($)" : "Valor total da operação ($)"}</label>
+                <input className="form-input" type="number" step="0.01" placeholder={txForm.type === "DIVIDENDO" ? "Ex: 12.50" : "Ex: 660.03"} value={txForm.total}
                   onChange={e => setTxForm(p => ({ ...p, total: e.target.value }))} />
-                {txForm.qty && txForm.total && Number(txForm.qty) > 0 && (
+                {txForm.qty && txForm.total && Number(txForm.qty) > 0 && txForm.type !== "DIVIDENDO" && (
                   <div className="form-hint">Preço por ação: {fmtCurrency(Number(txForm.total) / Number(txForm.qty))}</div>
                 )}
               </div>
@@ -3117,11 +3203,13 @@ export default function App() {
                 <input className="form-input" type="date" value={txForm.date}
                   onChange={e => setTxForm(p => ({ ...p, date: e.target.value }))} />
               </div>
+              {txForm.type !== "DIVIDENDO" && (
               <div className="form-group">
                 <label className="form-label">Taxas/Corretagem ($)</label>
                 <input className="form-input" type="number" step="0.01" placeholder="Opcional" value={txForm.fees}
                   onChange={e => setTxForm(p => ({ ...p, fees: e.target.value }))} />
               </div>
+              )}
             </div>
             {txForm.qty && txForm.total && (
               <div className="form-hint" style={{ marginBottom: 12 }}>
