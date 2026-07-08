@@ -693,8 +693,49 @@ export default function App() {
   const archivedBase = stocks.filter(s => s.archived);
 
 
+  // Ordenação da carteira: clique no cabeçalho da coluna para ordenar (padrão de planilha).
+  // sortKey = coluna; sortDir = "asc" | "desc". Por padrão sem ordenação (ordem de cadastro).
+  const [sortKey, setSortKey] = useState(null);
+  const [sortDir, setSortDir] = useState("desc");
+
+  const toggleSort = (key) => {
+    if (sortKey === key) {
+      // mesma coluna: inverte a direção; no 3º clique, volta ao normal
+      if (sortDir === "desc") setSortDir("asc");
+      else { setSortKey(null); setSortDir("desc"); }
+    } else {
+      setSortKey(key);
+      setSortDir("desc"); // primeira vez: maior para menor (o mais útil)
+    }
+  };
+
+  // Aplica a ordenação escolhida
+  const sortStocks = (list) => {
+    if (!sortKey) return list;
+    const val = (s) => {
+      const q = quotes[s.ticker];
+      const invested = s.totalInvested ?? (s.qty * s.avgPrice);
+      switch (sortKey) {
+        case "ticker":   return s.ticker;
+        case "qty":      return Number(s.qty) || 0;
+        case "avgPrice": return Number(s.avgPrice) || 0;
+        case "invested": return invested || 0;
+        case "price":    return q?.c ?? -Infinity;
+        case "today":    return q?.dp ?? -Infinity;           // variação % do dia
+        case "pl":       return (q?.c ? (q.c - s.avgPrice) * s.qty : -Infinity); // lucro/prejuízo
+        default:         return 0;
+      }
+    };
+    const sorted = [...list].sort((a, b) => {
+      const va = val(a), vb = val(b);
+      if (typeof va === "string") return va.localeCompare(vb);
+      return va - vb;
+    });
+    return sortDir === "desc" ? sorted.reverse() : sorted;
+  };
+
   // Listas para EXIBIÇÃO nas tabelas (aplicam a busca)
-  const activeStocks   = activeBase.filter(matchesSearch);
+  const activeStocks   = sortStocks(activeBase.filter(matchesSearch));
   const watchStocks    = watchBase.filter(matchesSearch);
   const archivedStocks = archivedBase.filter(matchesSearch);
 
@@ -2171,9 +2212,31 @@ export default function App() {
               );
             };
 
+            // Cabeçalho com colunas clicáveis para ordenar (clique = maior→menor; 2º clique inverte; 3º limpa)
+            const SortTh = ({ label, sk }) => (
+              <th onClick={() => toggleSort(sk)}
+                  style={{ cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}
+                  title="Clique para ordenar">
+                {label}
+                <span style={{ marginLeft: 4, opacity: sortKey === sk ? 1 : 0.25, fontSize: 10 }}>
+                  {sortKey === sk ? (sortDir === "desc" ? "▼" : "▲") : "⇅"}
+                </span>
+              </th>
+            );
             const headerRow = (
               <thead>
-                <tr><th>Ativo</th><th>Qtd</th><th>Médio</th><th>Total Aportado</th><th>Cotação</th><th>Hoje</th><th>P&L</th><th>Mín/Máx 30d + posição atual</th><th>Alertas</th><th></th></tr>
+                <tr>
+                  <SortTh label="Ativo" sk="ticker" />
+                  <SortTh label="Qtd" sk="qty" />
+                  <SortTh label="Médio" sk="avgPrice" />
+                  <SortTh label="Total Aportado" sk="invested" />
+                  <SortTh label="Cotação" sk="price" />
+                  <SortTh label="Hoje" sk="today" />
+                  <SortTh label="P&L" sk="pl" />
+                  <th>Mín/Máx 30d + posição atual</th>
+                  <th>Alertas</th>
+                  <th></th>
+                </tr>
               </thead>
             );
 
