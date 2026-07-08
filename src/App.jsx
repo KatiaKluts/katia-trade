@@ -705,7 +705,9 @@ export default function App() {
     "Imobiliário","Utilidades"
   ];
   // Classes de ativo (ETFs, cripto, etc. não têm setor GICS)
-  const ASSET_CLASSES = ["Ação","ETF","ETF Alavancado","Cripto","Ouro/Metais","Renda Fixa"];
+  // Classes de ativo (padrão prático de varejo — o que apps de investimento costumam usar).
+  // Mistura classe econômica (Ação, Renda Fixa) com veículo (ETF, REIT) porque é o mais útil no dia a dia.
+  const ASSET_CLASSES = ["Ação","ADR","ETF","ETF Alavancado","REIT","Renda Fixa","Cripto","Ouro/Metais","Commodities","Caixa","Outro"];
   const [form, setForm] = useState({ ticker: "", name: "", assetClass: "Ação", qty: "", avgPrice: "", minPrice: "", maxPrice: "", totalInvested: "", sector: "", leveraged: false, strategy: "Satélite", paysDividends: "nao", dividendYield: "", dividendFrequency: "", status: "MANTER", realizedPL: "", stopLoss: "", buyDate: "", note: "", archived: false });
   const [autoFilling, setAutoFilling] = useState(false);
   const [autoFillMsg, setAutoFillMsg] = useState(null);
@@ -2994,8 +2996,8 @@ export default function App() {
                   ))}
                 </div>
               </div>
-              {/* Sector — só para ações */}
-              {form.assetClass === "Ação" && (
+              {/* Setor — para Ação, ADR e REIT (todos têm setor econômico) */}
+              {(form.assetClass === "Ação" || form.assetClass === "ADR" || form.assetClass === "REIT") && (
                 <div className="form-group form-full">
                   <label className="form-label">Setor (GICS)</label>
                   <select className="form-input" value={form.sector}
