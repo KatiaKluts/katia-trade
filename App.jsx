@@ -45,8 +45,10 @@ function Icon({ name, size = 18, style, className }) {
 const FINNHUB_KEY = "d9377dpr01qq79pbeu20d9377dpr01qq79pbeu2g";
 // Twelve Data: usado como backup de cotação quando o Finnhub falha. Plano grátis: 8 req/min.
 const TWELVE_DATA_KEY = "d6d185bf6730430fa9a2cbd1854b7535";
-// Financial Modeling Prep (FMP): histórico diário de 30 dias (mín/máx reais, iguais à corretora).
-// Plano grátis: 250 req/dia. Traz open/high/low/close de cada dia.
+// Tiingo: FONTE PRINCIPAL do histórico de 30 dias (mín/máx reais, iguais à corretora).
+// Cobre ações US e ADRs (NOC, ITUB, etc.). Plano grátis: até 50 símbolos/hora — suficiente p/ 1x ao dia.
+const TIINGO_KEY = "64845bd8cc7c6675628612b2b2eb9ff151e31053";
+// Financial Modeling Prep (FMP): reserva do histórico de 30 dias (cobre menos ações).
 const FMP_KEY = "47IV0WOrSVTgQaCoZimdHyoQjTROgqgZ";
 
 // Bump this when the seed list changes to re-import into existing installs.
@@ -216,15 +218,15 @@ const SIGNAL_CONFIG = {
   ACUMULAR:  { bg: "#0c1a2e", border: "#3b82f6", text: "#60a5fa", icon: "●" },
 };
 const IMPACT_CONFIG = {
-  ALTO:  { color: "#ef4444", bg: "#2d0a0a", border: "#7f1d1d", dot: "🔴" },
-  MÉDIO: { color: "#f59e0b", bg: "#1c1200", border: "#78350f", dot: "🟡" },
-  BAIXO: { color: "#60a5fa", bg: "#0c1a2e", border: "#1e3a5f", dot: "🔵" },
+  ALTO:  { color: "#ef4444", bg: "#2d0a0a", border: "#7f1d1d", dot: "●" },
+  MÉDIO: { color: "#f59e0b", bg: "#1c1200", border: "#78350f", dot: "●" },
+  BAIXO: { color: "#60a5fa", bg: "#0c1a2e", border: "#1e3a5f", dot: "●" },
 };
 const TYPE_CONFIG = {
-  AMEAÇA:       { icon: "⚠️", color: "#ef4444", bg: "#1a0404" },
-  OPORTUNIDADE: { icon: "✅", color: "#4ade80", bg: "#021a0a" },
+  AMEAÇA:       { icon: "!", color: "#ef4444", bg: "#1a0404" },
+  OPORTUNIDADE: { icon: "▲", color: "#4ade80", bg: "#021a0a" },
   NEUTRO:       { icon: "ℹ️", color: "#94a3b8", bg: "#0d1117" },
-  EVENTO:       { icon: "📅", color: "#a78bfa", bg: "#13001a" },
+  EVENTO:       { icon: "◆", color: "#a78bfa", bg: "#13001a" },
 };
 
 // Cores por orientação (status) — usadas no agrupamento da carteira
@@ -413,23 +415,38 @@ async function fetchQuote(ticker) {
 }
 
 async function fetch30DayRange(ticker) {
-  // 1) FONTE PRINCIPAL: Financial Modeling Prep — histórico diário real com high/low de cada dia.
-  //    Pega os últimos 30 dias e retorna a menor mínima e a maior máxima (igual à corretora).
+  // 1) FONTE PRINCIPAL: Tiingo — histórico diário real com high/low de cada dia.
+  //    Cobre ações US e ADRs (NOC, ITUB, etc.). Retorna a menor mínima e a maior máxima dos ~30 dias.
+  try {
+    const start = new Date(Date.now() - 32 * 86400000).toISOString().slice(0, 10); // ~32 dias atrás
+    const r = await fetch(
+      `https://api.tiingo.com/tiingo/daily/${ticker}/prices?startDate=${start}&token=${TIINGO_KEY}`
+    );
+    const d = await r.json();
+    if (Array.isArray(d) && d.length) {
+      const lows  = d.map(x => Number(x.low)).filter(n => !isNaN(n));
+      const highs = d.map(x => Number(x.high)).filter(n => !isNaN(n));
+      if (lows.length && highs.length) {
+        return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "tiingo" };
+      }
+    }
+  } catch { /* segue para a reserva */ }
+  // 2) RESERVA: Financial Modeling Prep (cobre menos ações)
   try {
     const r = await fetch(
       `https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=${ticker}&apikey=${FMP_KEY}`
     );
     const d = await r.json();
     if (Array.isArray(d) && d.length) {
-      const last30 = d.slice(0, 30); // vem do mais recente para o mais antigo
+      const last30 = d.slice(0, 30);
       const lows  = last30.map(x => Number(x.low)).filter(n => !isNaN(n));
       const highs = last30.map(x => Number(x.high)).filter(n => !isNaN(n));
       if (lows.length && highs.length) {
         return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "fmp" };
       }
     }
-  } catch { /* segue para o fallback */ }
-  // 2) FALLBACK: Twelve Data (histórico diário)
+  } catch { /* segue para a próxima reserva */ }
+  // 3) RESERVA 2: Twelve Data (histórico diário)
   try {
     const r = await fetch(
       `https://api.twelvedata.com/time_series?symbol=${ticker}&interval=1day&outputsize=30&apikey=${TWELVE_DATA_KEY}`
@@ -442,8 +459,8 @@ async function fetch30DayRange(ticker) {
         return { min30: Math.min(...lows), max30: Math.max(...highs), fetchedAt: Date.now(), source: "twelvedata" };
       }
     }
-  } catch { /* segue para o último fallback */ }
-  // 3) ÚLTIMO FALLBACK: máxima/mínima do dia da cotação atual (aproximação)
+  } catch { /* segue para o último recurso */ }
+  // 4) ÚLTIMO RECURSO: máxima/mínima do dia da cotação atual (aproximação)
   try {
     const q = await fetchQuote(ticker);
     if (q && q.h && q.l) {
@@ -676,8 +693,49 @@ export default function App() {
   const archivedBase = stocks.filter(s => s.archived);
 
 
+  // Ordenação da carteira: clique no cabeçalho da coluna para ordenar (padrão de planilha).
+  // sortKey = coluna; sortDir = "asc" | "desc". Por padrão sem ordenação (ordem de cadastro).
+  const [sortKey, setSortKey] = useState(null);
+  const [sortDir, setSortDir] = useState("desc");
+
+  const toggleSort = (key) => {
+    if (sortKey === key) {
+      // mesma coluna: inverte a direção; no 3º clique, volta ao normal
+      if (sortDir === "desc") setSortDir("asc");
+      else { setSortKey(null); setSortDir("desc"); }
+    } else {
+      setSortKey(key);
+      setSortDir("desc"); // primeira vez: maior para menor (o mais útil)
+    }
+  };
+
+  // Aplica a ordenação escolhida
+  const sortStocks = (list) => {
+    if (!sortKey) return list;
+    const val = (s) => {
+      const q = quotes[s.ticker];
+      const invested = s.totalInvested ?? (s.qty * s.avgPrice);
+      switch (sortKey) {
+        case "ticker":   return s.ticker;
+        case "qty":      return Number(s.qty) || 0;
+        case "avgPrice": return Number(s.avgPrice) || 0;
+        case "invested": return invested || 0;
+        case "price":    return q?.c ?? -Infinity;
+        case "today":    return q?.dp ?? -Infinity;           // variação % do dia
+        case "pl":       return (q?.c ? (q.c - s.avgPrice) * s.qty : -Infinity); // lucro/prejuízo
+        default:         return 0;
+      }
+    };
+    const sorted = [...list].sort((a, b) => {
+      const va = val(a), vb = val(b);
+      if (typeof va === "string") return va.localeCompare(vb);
+      return va - vb;
+    });
+    return sortDir === "desc" ? sorted.reverse() : sorted;
+  };
+
   // Listas para EXIBIÇÃO nas tabelas (aplicam a busca)
-  const activeStocks   = activeBase.filter(matchesSearch);
+  const activeStocks   = sortStocks(activeBase.filter(matchesSearch));
   const watchStocks    = watchBase.filter(matchesSearch);
   const archivedStocks = archivedBase.filter(matchesSearch);
 
@@ -688,7 +746,9 @@ export default function App() {
     "Imobiliário","Utilidades"
   ];
   // Classes de ativo (ETFs, cripto, etc. não têm setor GICS)
-  const ASSET_CLASSES = ["Ação","ETF","ETF Alavancado","Cripto","Ouro/Metais","Renda Fixa"];
+  // Classes de ativo (padrão prático de varejo — o que apps de investimento costumam usar).
+  // Mistura classe econômica (Ação, Renda Fixa) com veículo (ETF, REIT) porque é o mais útil no dia a dia.
+  const ASSET_CLASSES = ["Ação","ADR","ETF","ETF Alavancado","REIT","Renda Fixa","Cripto","Ouro/Metais","Commodities","Caixa","Outro"];
   const [form, setForm] = useState({ ticker: "", name: "", assetClass: "Ação", qty: "", avgPrice: "", minPrice: "", maxPrice: "", totalInvested: "", sector: "", leveraged: false, strategy: "Satélite", paysDividends: "nao", dividendYield: "", dividendFrequency: "", status: "MANTER", realizedPL: "", stopLoss: "", buyDate: "", note: "", archived: false });
   const [autoFilling, setAutoFilling] = useState(false);
   const [autoFillMsg, setAutoFillMsg] = useState(null);
@@ -730,42 +790,111 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `carteira-katia-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `seedis-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    addToast("✅ Backup baixado! Guarde o arquivo em local seguro.", "buy");
+    addToast("Backup baixado. Guarde o arquivo em local seguro.", "buy");
   };
 
   // Exporta a carteira para CSV (abre no Excel / Google Sheets)
-  const exportCSV = () => {
-    const cols = ["Ticker","Nome","Classe","Setor","Estrategia","Orientacao","Quantidade","PrecoMedio","TotalInvestido","CotacaoAtual","ValorAtual","LucroPrejuizo","RentabilidadePct","PagaDividendos","DividendYield","StopLoss","DataCompra","Nota"];
-    // Arredonda valores monetários para 2 casas (ex: 699.11) — número limpo e calculável no Excel
-    const money = (v) => (v === "" || v == null || isNaN(v)) ? "" : Number(v).toFixed(2);
-    const rows = stocks.map(s => {
-      const q = quotes[s.ticker];
-      const cur = q?.c ? s.qty * q.c : "";
-      const inv = s.totalInvested ?? s.qty * s.avgPrice;
-      const pl = q?.c ? (s.qty * q.c - inv) : "";
-      const plPct = q?.c && inv ? (((s.qty * q.c - inv) / inv) * 100).toFixed(2) : "";
-      const esc = (v) => {
-        const str = v == null ? "" : String(v);
-        return /[",;\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
-      };
-      return [
-        s.ticker, s.name, s.assetClass || "Ação", s.sector || "", s.strategy || "", s.status || "",
-        Number(s.qty), money(s.avgPrice), money(inv), money(q?.c ?? ""), money(cur), money(pl), plPct,
-        s.paysDividends ? "Sim" : "Não", s.dividendYield ?? "", money(s.stopLoss ?? ""), s.buyDate ?? "", s.note ?? "",
-      ].map(esc).join(";");
-    });
-    const csv = "\uFEFF" + [cols.join(";"), ...rows].join("\n"); // BOM p/ acentos no Excel
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `carteira-katia-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    addToast("✅ CSV exportado! Abra no Excel ou Google Sheets.", "buy");
+  // Carrega o SheetJS (gerador de Excel) do CDN só quando precisar
+  const loadSheetJS = () => new Promise((resolve, reject) => {
+    if (window.XLSX) return resolve(window.XLSX);
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+    script.onload = () => resolve(window.XLSX);
+    script.onerror = () => reject(new Error("Falha ao carregar o gerador de Excel"));
+    document.head.appendChild(script);
+  });
+
+  const exportCSV = async () => {
+    let XLSX;
+    try {
+      XLSX = await loadSheetJS();
+    } catch {
+      addToast("Não consegui carregar o gerador de Excel. Verifique sua conexão.", "sell");
+      return;
+    }
+
+    const qtyOf = (s) => Number(s.qty) || 0;
+    const invOf = (s) => s.totalInvested != null ? Number(s.totalInvested) : qtyOf(s) * (Number(s.avgPrice) || 0);
+
+    // Separa e ordena
+    const ativas = stocks.filter(s => !s.archived && qtyOf(s) > 0).sort((a, b) => invOf(b) - invOf(a));
+    const observando = stocks.filter(s => !s.archived && qtyOf(s) <= 0).sort((a, b) => a.ticker.localeCompare(b.ticker));
+    const arquivadas = stocks.filter(s => s.archived).sort((a, b) => a.ticker.localeCompare(b.ticker));
+
+    const header = ["Ativo", "Nome", "Setor", "Estratégia", "Orientação", "Quantidade",
+                    "Preço Médio", "Total Investido", "Paga Div.", "Yield", "Freq. Div."];
+
+    // Monta as linhas como matriz (Array of Arrays) para controlar formato célula a célula
+    const aoa = [];
+    aoa.push(["SEEDIS — Relatório da Carteira"]);
+    aoa.push([`Exportado em ${new Date().toISOString().slice(0, 10)}  ·  Valores em dólar (US$)`]);
+    aoa.push([]);
+
+    const rowMeta = []; // guarda o tipo de cada linha para formatar depois
+    const pushRow = (arr, meta) => { aoa.push(arr); rowMeta.push(meta); };
+
+    // preenche cabeçalho + seções
+    const buildStockRow = (s) => [
+      s.ticker, s.name || "", s.sector || "", s.strategy || "", s.status || "",
+      qtyOf(s), Number(s.avgPrice) || 0, invOf(s),
+      s.paysDividends ? "Sim" : "Não",
+      (s.dividendYield != null ? Number(s.dividendYield) / 100 : ""),
+      s.dividendFrequency || "",
+    ];
+
+    // rowMeta alinhado com aoa a partir da linha 4 (índice 3)
+    while (rowMeta.length < aoa.length) rowMeta.push("skip");
+
+    const addSection = (title, list, withTotal) => {
+      pushRow([title], "section");
+      pushRow(header, "header");
+      const startExcelRow = aoa.length; // 1-based já que aoa vai virar linhas
+      list.forEach(s => pushRow(buildStockRow(s), "data"));
+      if (withTotal) {
+        const first = startExcelRow + 1; // +1 porque Excel é 1-based
+        const last = aoa.length;
+        pushRow(["TOTAL CARTEIRA", "", "", "", "", "", "", { f: `SUM(H${first}:H${last})` }, "", "", ""], "total");
+      }
+      pushRow([], "skip");
+    };
+
+    addSection(`CARTEIRA — Ações Ativas (${ativas.length})`, ativas, true);
+    if (observando.length) addSection(`OBSERVANDO (${observando.length})`, observando, false);
+    if (arquivadas.length) addSection(`ARQUIVADAS (${arquivadas.length})`, arquivadas, false);
+
+    // Cria a planilha
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+    // Larguras das colunas
+    ws["!cols"] = [
+      { wch: 8 }, { wch: 32 }, { wch: 24 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+      { wch: 12 }, { wch: 15 }, { wch: 10 }, { wch: 9 }, { wch: 12 },
+    ];
+
+    // Aplica formatos: percorre as células e formata moeda (G,H) e porcentagem (J)
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    for (let R = range.s.r; R <= range.e.r; R++) {
+      const meta = rowMeta[R] || "skip";
+      if (meta === "data" || meta === "total") {
+        // G (col 6) preço médio, H (col 7) total investido → moeda
+        [6, 7].forEach(C => {
+          const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+          if (cell && typeof cell.v === "number") cell.z = '"$"#,##0.00';
+          if (cell && cell.f) cell.z = '"$"#,##0.00';
+        });
+        // J (col 9) yield → porcentagem
+        const y = ws[XLSX.utils.encode_cell({ r: R, c: 9 })];
+        if (y && typeof y.v === "number") y.z = "0.00%";
+      }
+    }
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Carteira Seedis");
+    XLSX.writeFile(wb, `seedis-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    addToast("Relatório Excel exportado. Valores em dólar, prontos para somar.", "buy");
   };
 
   const importInputRef = useRef(null);
@@ -781,9 +910,9 @@ export default function App() {
         setStocks(data.stocks);
         setAlerts(data.alerts || {});
         if (data.transactions) setTransactions(data.transactions);
-        addToast(`✅ Backup restaurado: ${data.stocks.length} ações`, "buy");
+        addToast(`Backup restaurado: ${data.stocks.length} ações`, "buy");
       } catch (err) {
-        addToast("❌ Arquivo inválido. Use um backup gerado pelo próprio app.", "sell");
+        addToast("Arquivo inválido. Use um backup gerado pelo próprio app.", "sell");
       }
     };
     reader.readAsText(file);
@@ -794,11 +923,11 @@ export default function App() {
     const perm = await requestNotificationPermission();
     setNotifPerm(perm);
     if (perm === "granted") {
-      addToast("✅ Notificações ativadas! Você será avisada mesmo com a aba fechada.", "buy");
+      addToast("Notificações ativadas. Você será avisada mesmo com a aba fechada.", "buy");
       // register SW if not yet done
       if (!swRegRef.current) swRegRef.current = await registerServiceWorker();
     } else if (perm === "denied") {
-      addToast("❌ Notificações bloqueadas. Habilite nas configurações do navegador.", "sell");
+      addToast("Notificações bloqueadas. Habilite nas configurações do navegador.", "sell");
     }
   };
 
@@ -825,13 +954,13 @@ export default function App() {
       const ks = `${s.ticker}_sell`; const kb = `${s.ticker}_buy`;
       if (a?.active && a.sellTarget && price >= Number(a.sellTarget) && !firedRef.current[ks]) {
         firedRef.current[ks] = true;
-        notify(`🔴 VENDER — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu alvo de venda ${fmtCurrency(a.sellTarget)}`, "sell");
+        notify(`▼ VENDER — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu alvo de venda ${fmtCurrency(a.sellTarget)}`, "sell");
         setAlertLog(p => [{ id: Date.now(), ticker: s.ticker, type: "VENDA", price, target: a.sellTarget, time: new Date() }, ...p.slice(0, 49)]);
       }
       if (a?.sellTarget && price < Number(a.sellTarget) * 0.999) firedRef.current[ks] = false;
       if (a?.active && a.buyTarget && price <= Number(a.buyTarget) && !firedRef.current[kb]) {
         firedRef.current[kb] = true;
-        notify(`🟢 COMPRAR — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu piso de compra ${fmtCurrency(a.buyTarget)}`, "buy");
+        notify(`▲ COMPRAR — ${s.ticker}`, `Preço ${fmtCurrency(price)} atingiu seu piso de compra ${fmtCurrency(a.buyTarget)}`, "buy");
         setAlertLog(p => [{ id: Date.now(), ticker: s.ticker, type: "COMPRA", price, target: a.buyTarget, time: new Date() }, ...p.slice(0, 49)]);
       }
       if (a?.buyTarget && price > Number(a.buyTarget) * 1.001) firedRef.current[kb] = false;
@@ -839,7 +968,7 @@ export default function App() {
       const kstop = `${s.ticker}_stop`;
       if (s.stopLoss && Number(s.qty) > 0 && price <= Number(s.stopLoss) && !firedRef.current[kstop]) {
         firedRef.current[kstop] = true;
-        notify(`🛑 STOP-LOSS — ${s.ticker}`, `Preço ${fmtCurrency(price)} caiu até seu stop ${fmtCurrency(s.stopLoss)}. Reavalie a posição.`, "sell");
+        notify(`▼ STOP-LOSS — ${s.ticker}`, `Preço ${fmtCurrency(price)} caiu até seu stop ${fmtCurrency(s.stopLoss)}. Reavalie a posição.`, "sell");
         setAlertLog(p => [{ id: Date.now(), ticker: s.ticker, type: "STOP", price, target: s.stopLoss, time: new Date() }, ...p.slice(0, 49)]);
       }
       if (s.stopLoss && price > Number(s.stopLoss) * 1.001) firedRef.current[kstop] = false;
@@ -1195,6 +1324,35 @@ export default function App() {
 
   // ── Transações (fundação para rentabilidade real) ──
   const saveTransaction = () => {
+    // DIVIDENDO: registro simples — só ticker, valor recebido e data (sem qtd/preço).
+    if (txForm.type === "DIVIDENDO") {
+      const valor = Number(txForm.total);
+      const tickerDiv = txForm.ticker.toUpperCase().trim();
+      if (!tickerDiv || !valor) return;
+      const divTx = {
+        id: Date.now(),
+        ticker: tickerDiv,
+        type: "DIVIDENDO",
+        qty: 0,
+        price: 0,
+        total: valor,
+        date: txForm.date,
+        fees: 0,
+      };
+      const editingIdDiv = txForm._editingId || null;
+      if (editingIdDiv) {
+        const newList = [divTx, ...transactions.filter(t => t.id !== editingIdDiv)]
+          .sort((a, b) => new Date(b.date) - new Date(a.date));
+        setTransactions(newList);
+      } else {
+        setTransactions(p => [divTx, ...p].sort((a, b) => new Date(b.date) - new Date(a.date)));
+      }
+      setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" });
+      setShowTxForm(false);
+      addToast(`◆ Dividendo de ${fmtCurrency(valor)} da ${tickerDiv} registrado.`, "buy");
+      return;
+    }
+
     const qtyNum = Number(txForm.qty);
     const totalNum = Number(txForm.total);
     // O valor total é o que a usuária digita (vem do extrato); o preço por ação é derivado.
@@ -1291,10 +1449,10 @@ export default function App() {
     if (tx.type === "VENDA" && lastSellResultRef.current) {
       const { ticker, gain, soldAll, semCusto } = lastSellResultRef.current;
       if (semCusto) {
-        addToast(`⚠️ Venda de ${ticker} registrada, mas sem preço médio de compra cadastrado — o lucro/prejuízo NÃO foi calculado. Edite a ação e informe o preço médio para o cálculo ficar correto.`, "sell");
+        addToast(`Atenção: Venda de ${ticker} registrada, mas sem preço médio de compra cadastrado — o lucro/prejuízo NÃO foi calculado. Edite a ação e informe o preço médio para o cálculo ficar correto.`, "sell");
       } else {
         const gainTxt = gain >= 0 ? `lucro de ${fmtCurrency(gain)}` : `prejuízo de ${fmtCurrency(Math.abs(gain))}`;
-        addToast(`${gain >= 0 ? "📈" : "📉"} Venda de ${ticker} registrada — ${gainTxt} realizado.${soldAll ? " Posição zerada (agora em 👀 Observando)." : ""}`, gain >= 0 ? "buy" : "sell");
+        addToast(`${gain >= 0 ? "▲" : "▼"} Venda de ${ticker} registrada — ${gainTxt} realizado.${soldAll ? " Posição zerada (agora em Observando)." : ""}`, gain >= 0 ? "buy" : "sell");
       }
       lastSellResultRef.current = null;
     }
@@ -1531,8 +1689,27 @@ export default function App() {
         {/* HEADER */}
         <div className="header">
           <div>
-            <div className="logo"><span className="logo-mark"><Icon name="chart" /></span>{userProfile.name ? `${userProfile.name.toUpperCase()}` : "KÁTIA"}<span>.</span>TRADE</div>
-            <div className="sub">Portfólio · IA · Alertas · Inteligência de Mercado</div>
+            <div className="logo" style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <svg width="52" height="52" viewBox="0 0 130 130" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                  <linearGradient id="seedisGrad" x1="0" y1="1" x2="1" y2="0">
+                    <stop offset="0" stopColor="#16a34a"/>
+                    <stop offset="1" stopColor="#22d3ee"/>
+                  </linearGradient>
+                  <linearGradient id="seedisLeaf" x1="0" y1="1" x2="1" y2="0">
+                    <stop offset="0" stopColor="#22c55e"/>
+                    <stop offset="1" stopColor="#4ade80"/>
+                  </linearGradient>
+                </defs>
+                <rect x="14" y="70" width="16" height="34" rx="5" fill="#22d3ee" opacity="0.5"/>
+                <rect x="38" y="54" width="16" height="50" rx="5" fill="#22d3ee" opacity="0.75"/>
+                <path d="M76,104 L76,46" stroke="url(#seedisGrad)" strokeWidth="8" strokeLinecap="round"/>
+                <path d="M76,54 C76,30 94,16 116,16 C116,40 98,54 76,54 Z" fill="url(#seedisLeaf)"/>
+                <path d="M76,68 C76,50 60,38 42,38 C42,56 58,68 76,68 Z" fill="#34d399"/>
+              </svg>
+              <span style={{ fontWeight: 800, letterSpacing: "-0.5px", fontSize: "34px" }}>seedis</span>
+            </div>
+            <div className="sub">Invista &amp; Cresça</div>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             {/* aviso discreto só quando notificações bloqueadas */}
@@ -1555,7 +1732,7 @@ export default function App() {
                   <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 50, background: "#0f1623", border: "1px solid #1c2740", borderRadius: 12, padding: 6, minWidth: 210, boxShadow: "0 12px 32px rgba(0,0,0,.5)" }}>
                     {[
                       ["refresh", "Atualizar cotações", () => { refreshAll(); setShowSettings(false); }],
-                      ["spreadsheet", "Exportar (Excel/CSV)", () => { exportCSV(); setShowSettings(false); }],
+                      ["spreadsheet", "Exportar relatório (Excel)", () => { exportCSV(); setShowSettings(false); }],
                       ["download", "Fazer backup", () => { exportData(); setShowSettings(false); }],
                       ["upload", "Restaurar backup", () => { importInputRef.current?.click(); setShowSettings(false); }],
                       ["gear", "Perfil da carteira", () => { setShowProfile(true); setShowSettings(false); }],
@@ -1708,6 +1885,58 @@ export default function App() {
                         </div>
                       ))}
                     </div>
+
+                    {/* DIVIDENDOS RECEBIDOS + TOTAL GERAL */}
+                    {(() => {
+                      const divTx = transactions.filter(t => t.type === "DIVIDENDO");
+                      const totalDiv = divTx.reduce((acc, t) => acc + Number(t.total || 0), 0);
+                      const totalGeral = totalRealized + totalDiv;
+                      // agrupa dividendos por ação
+                      const porAcao = {};
+                      divTx.forEach(t => { porAcao[t.ticker] = (porAcao[t.ticker] || 0) + Number(t.total || 0); });
+                      const ranking = Object.entries(porAcao).sort((a, b) => b[1] - a[1]);
+                      // total no ano corrente
+                      const anoAtual = new Date().getFullYear();
+                      const totalAno = divTx.filter(t => new Date(t.date).getFullYear() === anoAtual)
+                        .reduce((acc, t) => acc + Number(t.total || 0), 0);
+                      return (
+                        <>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+                            <div className="card">
+                              <div className="card-label">Dividendos Recebidos (total)</div>
+                              <div className="card-val" style={{ color: "#22d3ee", fontSize: 20 }}>{fmtCurrency(totalDiv)}</div>
+                            </div>
+                            <div className="card">
+                              <div className="card-label">Dividendos em {anoAtual}</div>
+                              <div className="card-val" style={{ color: "#22d3ee", fontSize: 20 }}>{fmtCurrency(totalAno)}</div>
+                            </div>
+                            <div className="card" style={{ border: "1px solid #1e3327", background: "linear-gradient(160deg,#0f1f18,#0e1b14)" }}>
+                              <div className="card-label">Resultado Total (vendas + dividendos)</div>
+                              <div className="card-val" style={{ color: totalGeral >= 0 ? "#4ade80" : "#f87171", fontSize: 20 }}>{fmtCurrency(totalGeral)}</div>
+                            </div>
+                          </div>
+                          {ranking.length > 0 && (
+                            <div className="card">
+                              <div className="card-label" style={{ marginBottom: 14 }}>Dividendos Recebidos por Ação</div>
+                              <table className="table">
+                                <thead><tr><th>Ativo</th><th>Total recebido</th></tr></thead>
+                                <tbody>
+                                  {ranking.map(([tk, val]) => (
+                                    <tr key={tk}>
+                                      <td className="ticker-cell">{tk}</td>
+                                      <td className="mono" style={{ color: "#22d3ee" }}>{fmtCurrency(val)}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                              <div className="form-hint" style={{ marginTop: 10 }}>
+                                Registre os dividendos que você recebeu na aba Transações (botão "Registrar", tipo Dividendo).
+                              </div>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                     {withResults.length > 0 && (
                       <div className="card">
                         <div className="card-label" style={{ marginBottom: 14 }}>Histórico de Lucro/Prejuízo por Ação (vendas já realizadas)</div>
@@ -1779,7 +2008,7 @@ export default function App() {
                 {transactions.length} {transactions.length === 1 ? "transação registrada" : "transações registradas"}
               </div>
               <button className="btn btn-primary btn-sm" onClick={() => { setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" }); setShowTxForm(true); }}>
-                + Registrar Compra/Venda
+                + Registrar Compra/Venda/Dividendo
               </button>
             </div>
             {transactions.length === 0 ? (
@@ -1792,21 +2021,24 @@ export default function App() {
                 <thead><tr><th>Data</th><th>Tipo</th><th>Ativo</th><th>Qtd</th><th>Preço</th><th>Taxas</th><th>Total</th><th></th></tr></thead>
                 <tbody>
                   {transactions.map(t => {
-                    const total = t.qty * t.price + (t.type === "COMPRA" ? t.fees : -t.fees);
+                    const total = t.type === "DIVIDENDO" ? Number(t.total) : t.qty * t.price + (t.type === "COMPRA" ? t.fees : -t.fees);
+                    const tipoBg = t.type === "COMPRA" ? "#052e16" : t.type === "VENDA" ? "#2d0a0a" : "#04252e";
+                    const tipoColor = t.type === "COMPRA" ? "#4ade80" : t.type === "VENDA" ? "#f87171" : "#22d3ee";
+                    const totalColor = t.type === "COMPRA" ? "#f87171" : t.type === "VENDA" ? "#4ade80" : "#22d3ee";
                     return (
                       <tr key={t.id}>
                         <td className="mono" style={{ fontSize: 12 }}>{fmtDate(t.date)}</td>
                         <td>
                           <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 3, fontFamily: "'IBM Plex Mono',monospace",
-                            background: t.type === "COMPRA" ? "#052e16" : "#2d0a0a", color: t.type === "COMPRA" ? "#4ade80" : "#f87171" }}>
-                            {t.type}
+                            background: tipoBg, color: tipoColor }}>
+                            {t.type === "DIVIDENDO" ? "◆ DIV" : t.type}
                           </span>
                         </td>
                         <td className="ticker-cell">{t.ticker}</td>
-                        <td className="mono">{t.qty}</td>
-                        <td className="mono">{fmtCurrency(t.price)}</td>
+                        <td className="mono">{t.type === "DIVIDENDO" ? "—" : t.qty}</td>
+                        <td className="mono">{t.type === "DIVIDENDO" ? "—" : fmtCurrency(t.price)}</td>
                         <td className="mono" style={{ color: "#64748b" }}>{t.fees ? fmtCurrency(t.fees) : "—"}</td>
-                        <td className="mono" style={{ color: t.type === "COMPRA" ? "#f87171" : "#4ade80" }}>{fmtCurrency(total)}</td>
+                        <td className="mono" style={{ color: totalColor }}>{fmtCurrency(total)}</td>
                         <td>
                           <div style={{ display: "flex", gap: 6 }}>
                             <button className="btn btn-ghost btn-sm" title="Editar transação" onClick={() => {
@@ -1980,9 +2212,31 @@ export default function App() {
               );
             };
 
+            // Cabeçalho com colunas clicáveis para ordenar (clique = maior→menor; 2º clique inverte; 3º limpa)
+            const SortTh = ({ label, sk }) => (
+              <th onClick={() => toggleSort(sk)}
+                  style={{ cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}
+                  title="Clique para ordenar">
+                {label}
+                <span style={{ marginLeft: 4, opacity: sortKey === sk ? 1 : 0.25, fontSize: 10 }}>
+                  {sortKey === sk ? (sortDir === "desc" ? "▼" : "▲") : "⇅"}
+                </span>
+              </th>
+            );
             const headerRow = (
               <thead>
-                <tr><th>Ativo</th><th>Qtd</th><th>Médio</th><th>Total Aportado</th><th>Cotação</th><th>Hoje</th><th>P&L</th><th>Mín/Máx 30d + posição atual</th><th>Alertas</th><th></th></tr>
+                <tr>
+                  <SortTh label="Ativo" sk="ticker" />
+                  <SortTh label="Qtd" sk="qty" />
+                  <SortTh label="Médio" sk="avgPrice" />
+                  <SortTh label="Total Aportado" sk="invested" />
+                  <SortTh label="Cotação" sk="price" />
+                  <SortTh label="Hoje" sk="today" />
+                  <SortTh label="P&L" sk="pl" />
+                  <th>Mín/Máx 30d + posição atual</th>
+                  <th>Alertas</th>
+                  <th></th>
+                </tr>
               </thead>
             );
 
@@ -2535,7 +2789,7 @@ export default function App() {
               <div className="card-label" style={{ marginBottom: 6 }}>Observando — {watchStocks.length} {watchStocks.length === 1 ? "ativo" : "ativos"} (sem posição)</div>
               <div className="form-hint" style={{ marginBottom: 14 }}>Ações que você acompanha para avaliar a compra. Não entram nos cálculos da carteira.</div>
               <table className="table">
-                <thead><tr><th>Ativo</th><th>Cotação</th><th>Hoje</th><th>Alvo compra</th><th>Minha tese</th><th></th></tr></thead>
+                <thead><tr><th>Ativo</th><th>Cotação</th><th>Hoje</th><th>Mín/Máx 30d</th><th>Alvo compra</th><th>Minha tese</th><th></th></tr></thead>
                 <tbody>
                   {watchStocks.map(s => {
                     const q = quotes[s.ticker];
@@ -2556,6 +2810,34 @@ export default function App() {
                         </td>
                         <td className="mono" style={{ color: q?.c ? "#f8fafc" : "#475569" }}>{q?.c ? fmtCurrency(q.c) : "…"}</td>
                         <td className="mono" style={{ color: pctColor(q?.dp) }}>{q?.dp != null ? fmtPct(q.dp) : "—"}</td>
+                        <td style={{ minWidth: 150 }}>
+                          {s.min30 != null && s.max30 != null ? (() => {
+                            const wpos = (q?.c && s.max30 !== s.min30)
+                              ? Math.min(100, Math.max(0, ((q.c - s.min30) / (s.max30 - s.min30)) * 100))
+                              : null;
+                            return (
+                              <div className="range-cell">
+                                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 10 }}>
+                                  <span style={{ color: "#22c55e" }}>{fmtCurrency(s.min30)}</span>
+                                  <span style={{ color: "#ef4444" }}>{fmtCurrency(s.max30)}</span>
+                                </div>
+                                <div className="range-bar-wrap">
+                                  <div className="range-bar-fill" style={{ width: "100%" }} />
+                                  {wpos != null && (
+                                    <div className="range-dot" style={{ left: `${wpos}%` }} title={`Cotação atual: ${fmtCurrency(q?.c)}`} />
+                                  )}
+                                </div>
+                                {wpos != null && (
+                                  <div style={{ fontSize: 9.5, color: wpos < 25 ? "#4ade80" : "#64748b", marginTop: 3, textAlign: "center" }}>
+                                    {wpos < 25 ? "perto da mínima — bom p/ comprar" : wpos > 75 ? "perto da máxima" : "no meio do range"}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })() : (
+                            <button className="btn btn-ghost btn-sm" onClick={() => refresh30DayRange(s.ticker)} style={{ fontSize: 10 }}>buscar 30d</button>
+                          )}
+                        </td>
                         <td className="mono" style={{ color: "#4ade80" }}>{a?.buyTarget ? fmtCurrency(a.buyTarget) : (s.minPrice ? fmtCurrency(s.minPrice) : "—")}</td>
                         <td style={{ fontSize: 11, color: "#94a3b8", fontStyle: "italic", maxWidth: 220 }}>{s.note || "—"}</td>
                         <td>
@@ -2777,8 +3059,8 @@ export default function App() {
                   ))}
                 </div>
               </div>
-              {/* Sector — só para ações */}
-              {form.assetClass === "Ação" && (
+              {/* Setor — para Ação, ADR e REIT (todos têm setor econômico) */}
+              {(form.assetClass === "Ação" || form.assetClass === "ADR" || form.assetClass === "REIT") && (
                 <div className="form-group form-full">
                   <label className="form-label">Setor (GICS)</label>
                   <select className="form-input" value={form.sector}
@@ -2911,15 +3193,21 @@ export default function App() {
               <div className="form-group form-full">
                 <label className="form-label">Tipo</label>
                 <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                  {["COMPRA","VENDA"].map(v => (
+                  {["COMPRA","VENDA","DIVIDENDO"].map(v => (
                     <button key={v} type="button"
                       style={{ flex: 1, padding: "10px", borderRadius: 5,
-                        border: `1px solid ${txForm.type===v ? (v==="COMPRA"?"#16a34a":"#dc2626") : "#1e293b"}`,
-                        background: txForm.type===v ? (v==="COMPRA"?"#052e16":"#2d0a0a") : "#080b10",
-                        color: txForm.type===v ? (v==="COMPRA"?"#4ade80":"#f87171") : "#64748b",
-                        cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "'IBM Plex Sans',sans-serif" }}
-                      onClick={() => setTxForm(p => ({ ...p, type: v }))}>
-                      {v === "COMPRA" ? "▲ Compra" : "▼ Venda"}
+                        border: `1px solid ${txForm.type===v ? (v==="COMPRA"?"#16a34a":v==="VENDA"?"#dc2626":"#0891b2") : "#1e293b"}`,
+                        background: txForm.type===v ? (v==="COMPRA"?"#052e16":v==="VENDA"?"#2d0a0a":"#04252e") : "#080b10",
+                        color: txForm.type===v ? (v==="COMPRA"?"#4ade80":v==="VENDA"?"#f87171":"#22d3ee") : "#64748b",
+                        cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "'IBM Plex Sans',sans-serif" }}
+                      onClick={() => setTxForm(p => {
+                        // Ao mudar para VENDA/DIVIDENDO, se a ação escolhida não tem posição, limpa a seleção
+                        // (ela não aparece mais na lista filtrada, evita ficar "presa").
+                        const stk = stocks.find(s => s.ticker === p.ticker);
+                        const perdeSelecao = v !== "COMPRA" && stk && !(Number(stk.qty) > 0);
+                        return { ...p, type: v, ticker: perdeSelecao ? "" : p.ticker };
+                      })}>
+                      {v === "COMPRA" ? "▲ Compra" : v === "VENDA" ? "▼ Venda" : "◆ Dividendo"}
                     </button>
                   ))}
                 </div>
@@ -2942,7 +3230,14 @@ export default function App() {
                     }));
                   }}>
                   <option value="">Selecione uma ação cadastrada…</option>
-                  {[...stocks].sort((a, b) => a.ticker.localeCompare(b.ticker)).map(s => (
+                  {[...stocks]
+                    .filter(s => {
+                      // COMPRA: mostra todas (inclusive observação, pois você observa p/ comprar).
+                      // VENDA e DIVIDENDO: só as que você tem posição (qtd > 0).
+                      if (txForm.type === "COMPRA") return !s.archived;
+                      return !s.archived && Number(s.qty) > 0;
+                    })
+                    .sort((a, b) => a.ticker.localeCompare(b.ticker)).map(s => (
                     <option key={s.id} value={s.ticker}>
                       {s.ticker} — {s.name}{Number(s.qty) > 0 ? ` (tem ${s.qty})` : " (observando)"}
                     </option>
@@ -2973,6 +3268,7 @@ export default function App() {
                   );
                 })()}
               </div>
+              {txForm.type !== "DIVIDENDO" && (
               <div className="form-group">
                 <label className="form-label">Quantidade</label>
                 <input className="form-input" type="number" step="0.0001" placeholder="10" value={txForm.qty}
@@ -2988,11 +3284,12 @@ export default function App() {
                   );
                 })()}
               </div>
+              )}
               <div className="form-group">
-                <label className="form-label">Valor total da operação ($)</label>
-                <input className="form-input" type="number" step="0.01" placeholder="Ex: 660.03" value={txForm.total}
+                <label className="form-label">{txForm.type === "DIVIDENDO" ? "Valor recebido ($)" : "Valor total da operação ($)"}</label>
+                <input className="form-input" type="number" step="0.01" placeholder={txForm.type === "DIVIDENDO" ? "Ex: 12.50" : "Ex: 660.03"} value={txForm.total}
                   onChange={e => setTxForm(p => ({ ...p, total: e.target.value }))} />
-                {txForm.qty && txForm.total && Number(txForm.qty) > 0 && (
+                {txForm.qty && txForm.total && Number(txForm.qty) > 0 && txForm.type !== "DIVIDENDO" && (
                   <div className="form-hint">Preço por ação: {fmtCurrency(Number(txForm.total) / Number(txForm.qty))}</div>
                 )}
               </div>
@@ -3001,11 +3298,13 @@ export default function App() {
                 <input className="form-input" type="date" value={txForm.date}
                   onChange={e => setTxForm(p => ({ ...p, date: e.target.value }))} />
               </div>
+              {txForm.type !== "DIVIDENDO" && (
               <div className="form-group">
                 <label className="form-label">Taxas/Corretagem ($)</label>
                 <input className="form-input" type="number" step="0.01" placeholder="Opcional" value={txForm.fees}
                   onChange={e => setTxForm(p => ({ ...p, fees: e.target.value }))} />
               </div>
+              )}
             </div>
             {txForm.qty && txForm.total && (
               <div className="form-hint" style={{ marginBottom: 12 }}>
