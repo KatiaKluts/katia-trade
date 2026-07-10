@@ -1709,7 +1709,7 @@ export default function App() {
               </svg>
               <span style={{ fontWeight: 800, letterSpacing: "-0.5px", fontSize: "34px" }}>seedis</span>
             </div>
-            <div className="sub">Invista · Cresça · Portfólio · Alertas</div>
+            <div className="sub">Invista &amp; Cresça</div>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             {/* aviso discreto só quando notificações bloqueadas */}
