@@ -1144,6 +1144,8 @@ export default function App() {
         sector: profile?.sector || "",
         min30: range?.min30 ?? null,
         max30: range?.max30 ?? null,
+        paysDividends: profile?.paysDividends || false,
+        dividendYield: profile?.dividendYield ?? null,
         qty: 0, avgPrice: 0,
         _research: true,
       });
@@ -2501,6 +2503,8 @@ export default function App() {
                         ["P&L",         (selQuote?.c && selStock?.avgPrice) ? fmtPct(((selQuote.c - selStock.avgPrice) / selStock.avgPrice) * 100) : "—", pctColor(selQuote?.c && selStock?.avgPrice ? selQuote.c - selStock.avgPrice : null)],
                         ["Mín 30d",    selStock?.min30 != null ? fmtCurrency(selStock.min30) : "—", "#22c55e"],
                         ["Máx 30d",    selStock?.max30 != null ? fmtCurrency(selStock.max30) : "—", "#ef4444"],
+                        ["Dividend Yield", (selStock?.paysDividends && selStock?.dividendYield) ? `${selStock.dividendYield}%` : (selStock?.paysDividends ? "paga" : "não paga"), selStock?.paysDividends ? "#22d3ee" : "#64748b"],
+                        ["Freq. Dividendo", (selStock?.paysDividends && selStock?.dividendFrequency) ? selStock.dividendFrequency : "—", "#22d3ee"],
                       ].map(([label, val, color]) => (
                         <div key={label}>
                           <div style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>{label}</div>
