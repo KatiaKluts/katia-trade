@@ -414,58 +414,6 @@ async function fetchQuote(ticker) {
   return null;
 }
 
-// Busca dividendos no Tiingo (último ano) e calcula: se paga, frequência e yield aproximado.
-// O Tiingo cobre ADRs brasileiras (CIG, ITUB...) que o Finnhub erra. Cada dia traz "divCash"
-// (valor pago naquele dia); somamos os do último ano e estimamos a frequência pela contagem.
-async function fetchDividendInfo(ticker, currentPrice) {
-  try {
-    const start = new Date(Date.now() - 370 * 86400000).toISOString().slice(0, 10); // ~1 ano
-    const r = await fetch(
-      `https://api.tiingo.com/tiingo/daily/${ticker}/prices?startDate=${start}&token=${TIINGO_KEY}`
-    );
-    const d = await r.json();
-    if (!Array.isArray(d) || !d.length) {
-      return { known: false }; // sem dados → desconhecido (não afirma "não paga")
-    }
-    // pega os dias em que houve pagamento de dividendo
-    const pagamentos = d
-      .map(x => ({ date: x.date, div: Number(x.divCash) || 0 }))
-      .filter(x => x.div > 0);
-
-    if (pagamentos.length === 0) {
-      // Tiingo devolveu preços mas nenhum dividendo. ATENÇÃO: isso pode significar
-      // (a) a ação realmente não paga, OU (b) o Tiingo não tem os dados de dividendo dela.
-      // Como não dá para distinguir com certeza, NÃO afirmamos "não paga" aqui.
-      // Retornamos "não encontrado" e deixamos quem chama decidir (cruzando com o Finnhub).
-      return { known: false, tiingoSemDividendo: true };
-    }
-
-    // soma dos dividendos no último ano
-    const totalAno = pagamentos.reduce((acc, p) => acc + p.div, 0);
-    // yield aproximado = soma anual ÷ preço atual × 100
-    const preco = Number(currentPrice) || 0;
-    const yieldAprox = preco > 0 ? Number(((totalAno / preco) * 100).toFixed(2)) : null;
-
-    // estima a frequência pela quantidade de pagamentos no ano
-    const n = pagamentos.length;
-    let frequency;
-    if (n >= 11) frequency = "Mensal";
-    else if (n >= 3) frequency = "Trimestral";
-    else if (n === 2) frequency = "Semestral";
-    else frequency = "Anual";
-
-    return {
-      known: true,
-      paysDividends: true,
-      dividendYield: yieldAprox,
-      frequency,
-      lastPayments: pagamentos.slice(-3).reverse(), // últimos 3 pagamentos (mais recente primeiro)
-    };
-  } catch {
-    return { known: false }; // erro → desconhecido
-  }
-}
-
 async function fetch30DayRange(ticker) {
   // 1) FONTE PRINCIPAL: Tiingo — histórico diário real com high/low de cada dia.
   //    Cobre ações US e ADRs (NOC, ITUB, etc.). Retorna a menor mínima e a maior máxima dos ~30 dias.
@@ -560,20 +508,12 @@ async function fetchProfile(ticker) {
     const metrics = await metricsRes.json();
     const m = metrics?.metric || {};
     const yieldVal = m.currentDividendYieldTTM ?? m.dividendYieldIndicatedAnnual ?? null;
-    // IMPORTANTE: o Finnhub costuma NÃO ter dados de dividendo para ADRs brasileiras
-    // (CIG, ITUB, etc.). Quando o yield vem null, NÃO significa "não paga" — significa
-    // "dado desconhecido". Distinguimos os dois casos para não afirmar algo falso.
-    const yieldConhecido = yieldVal != null;
     return {
       name: profile?.name || "",
       sector: mapSector(profile?.finnhubIndustry),
       finnhubIndustry: profile?.finnhubIndustry || null,
-      // só afirma "paga" se o yield veio e é > 0
-      paysDividends: yieldConhecido && yieldVal > 0,
-      // yield só quando conhecido e positivo
-      dividendYield: (yieldConhecido && yieldVal > 0) ? Number(yieldVal.toFixed(2)) : null,
-      // flag: o dado de dividendo é confiável? (se null, o app mostra "verificar na corretora")
-      dividendKnown: yieldConhecido,
+      paysDividends: yieldVal != null && yieldVal > 0,
+      dividendYield: yieldVal != null && yieldVal > 0 ? Number(yieldVal.toFixed(2)) : null,
     };
   } catch { return null; }
 }
@@ -1192,42 +1132,17 @@ export default function App() {
       }
       setQuotes(p => ({ ...p, [ticker]: quote }));
       setNews(p => ({ ...p, [ticker]: newsData || [] }));
-      // Busca dividendos no Tiingo (cobre ADRs que o Finnhub erra): se paga, frequência e yield
-      const divInfo = await fetchDividendInfo(ticker, quote.c);
       const analysis = await fetchClaudeAnalysis(
         { ticker, name: profile?.name || ticker, avgPrice: 0, qty: 0, min30: range?.min30, max30: range?.max30 },
         quote, (newsData || []).map(n => n.headline)
       );
       setAnalyses(p => ({ ...p, [ticker]: analysis }));
-      // Regra de CERTEZA para dividendos (evita afirmar algo falso):
-      // - Tiingo achou pagamentos → PAGA (com certeza). Usa yield e frequência do Tiingo.
-      // - Tiingo não achou, mas Finnhub diz que paga → PAGA (usa dado do Finnhub).
-      // - Tiingo não achou E Finnhub também diz que paga=0 COM yield conhecido → não paga.
-      // - Qualquer outra dúvida → "consultar corretora" (known=false).
-      let paga, yld, freq, known;
-      if (divInfo.known && divInfo.paysDividends) {
-        // Tiingo tem certeza: paga
-        paga = true; yld = divInfo.dividendYield; freq = divInfo.frequency; known = true;
-      } else if (profile?.dividendKnown && profile?.paysDividends) {
-        // Finnhub tem o dado e diz que paga
-        paga = true; yld = profile.dividendYield; freq = null; known = true;
-      } else if (divInfo.tiingoSemDividendo && profile?.dividendKnown && !profile?.paysDividends) {
-        // Tiingo não achou pagamento E Finnhub confirma que não paga → dois indícios, não paga
-        paga = false; yld = null; freq = null; known = true;
-      } else {
-        // Dúvida → não afirma nada, manda consultar a corretora
-        paga = false; yld = null; freq = null; known = false;
-      }
       setResearchStock({
         ticker,
         name: profile?.name || ticker,
         sector: profile?.sector || "",
         min30: range?.min30 ?? null,
         max30: range?.max30 ?? null,
-        paysDividends: paga,
-        dividendYield: yld,
-        dividendFrequency: freq,
-        dividendKnown: known,
         qty: 0, avgPrice: 0,
         _research: true,
       });
@@ -1292,15 +1207,19 @@ export default function App() {
     const found = [];
     if (profile?.name)        found.push("nome");
     if (profile?.sector)      found.push("setor");
+    let puxouYield = false;
     if (profile?.paysDividends || divs?.nextPayDate || divs?.lastPayDate) {
       let divInfo = "dividendos";
-      if (profile?.dividendYield) divInfo += ` (yield ${profile.dividendYield}%`;
+      if (profile?.dividendYield) { divInfo += ` (yield ${profile.dividendYield}%`; puxouYield = true; }
       if (divs?.frequency) divInfo += profile?.dividendYield ? `, ${divs.frequency.toLowerCase()})` : ` (${divs.frequency.toLowerCase()})`;
       else if (profile?.dividendYield) divInfo += ")";
       found.push(divInfo);
     } else if (profile) found.push("sem dividendos");
     if (range)                found.push("mín/máx 30d");
-    setAutoFillMsg(found.length ? `✓ Preenchido: ${found.join(", ")}` : "Não encontrei dados automáticos para este ticker.");
+    const msgBase = found.length ? `✓ Preenchido: ${found.join(", ")}` : "Não encontrei dados automáticos para este ticker.";
+    // Aviso honesto: o yield/dividendo vem do Finnhub, que erra em ADRs. É estimativa a conferir.
+    const aviso = puxouYield ? " — o yield é uma estimativa; confirme na sua corretora." : "";
+    setAutoFillMsg(msgBase + aviso);
     setAutoFilling(false);
   };
 
@@ -2585,8 +2504,6 @@ export default function App() {
                         ["P&L",         (selQuote?.c && selStock?.avgPrice) ? fmtPct(((selQuote.c - selStock.avgPrice) / selStock.avgPrice) * 100) : "—", pctColor(selQuote?.c && selStock?.avgPrice ? selQuote.c - selStock.avgPrice : null)],
                         ["Mín 30d",    selStock?.min30 != null ? fmtCurrency(selStock.min30) : "—", "#22c55e"],
                         ["Máx 30d",    selStock?.max30 != null ? fmtCurrency(selStock.max30) : "—", "#ef4444"],
-                        ["Dividend Yield", (selStock?.paysDividends && selStock?.dividendYield) ? `${selStock.dividendYield}%` : (selStock?.paysDividends ? "paga" : (selStock?._research && selStock?.dividendKnown === false ? "consultar corretora" : "não paga")), selStock?.paysDividends ? "#22d3ee" : (selStock?._research && selStock?.dividendKnown === false ? "#f59e0b" : "#64748b")],
-                        ["Freq. Dividendo", (selStock?.paysDividends && selStock?.dividendFrequency) ? selStock.dividendFrequency : "—", "#22d3ee"],
                       ].map(([label, val, color]) => (
                         <div key={label}>
                           <div style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 1, marginBottom: 3 }}>{label}</div>
@@ -3260,6 +3177,11 @@ export default function App() {
                   style={{ opacity: form.paysDividends !== "sim" ? 0.4 : 1 }}
                   value={form.dividendYield}
                   onChange={e => setForm(p => ({ ...p, dividendYield: e.target.value }))} />
+                {form.paysDividends === "sim" && (
+                  <div className="form-hint" style={{ color: "#fbbf24", marginTop: 4 }}>
+                    Se preenchido automaticamente, o yield é uma estimativa — confirme o valor na sua corretora.
+                  </div>
+                )}
               </div>
               {/* Dividend frequency (data de pagamento removida a pedido) */}
               <div className="form-group">
