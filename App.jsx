@@ -1137,7 +1137,6 @@ export default function App() {
         quote, (newsData || []).map(n => n.headline)
       );
       setAnalyses(p => ({ ...p, [ticker]: analysis }));
-      // monta o "stock pesquisado" para exibir (não está na carteira)
       setResearchStock({
         ticker,
         name: profile?.name || ticker,
@@ -1208,15 +1207,19 @@ export default function App() {
     const found = [];
     if (profile?.name)        found.push("nome");
     if (profile?.sector)      found.push("setor");
+    let puxouYield = false;
     if (profile?.paysDividends || divs?.nextPayDate || divs?.lastPayDate) {
       let divInfo = "dividendos";
-      if (profile?.dividendYield) divInfo += ` (yield ${profile.dividendYield}%`;
+      if (profile?.dividendYield) { divInfo += ` (yield ${profile.dividendYield}%`; puxouYield = true; }
       if (divs?.frequency) divInfo += profile?.dividendYield ? `, ${divs.frequency.toLowerCase()})` : ` (${divs.frequency.toLowerCase()})`;
       else if (profile?.dividendYield) divInfo += ")";
       found.push(divInfo);
     } else if (profile) found.push("sem dividendos");
     if (range)                found.push("mín/máx 30d");
-    setAutoFillMsg(found.length ? `✓ Preenchido: ${found.join(", ")}` : "Não encontrei dados automáticos para este ticker.");
+    const msgBase = found.length ? `✓ Preenchido: ${found.join(", ")}` : "Não encontrei dados automáticos para este ticker.";
+    // Aviso honesto: o yield/dividendo vem do Finnhub, que erra em ADRs. É estimativa a conferir.
+    const aviso = puxouYield ? " — o yield é uma estimativa; confirme na sua corretora." : "";
+    setAutoFillMsg(msgBase + aviso);
     setAutoFilling(false);
   };
 
@@ -1369,17 +1372,47 @@ export default function App() {
     };
     if (!tx.ticker || !tx.qty || !tx.total) return;
 
+    // PROTEÇÃO: não permite VENDER mais do que se tem na posição.
+    // (Evita quantidade negativa e mantém os cálculos sempre corretos e reversíveis.)
+    if (tx.type === "VENDA") {
+      const posAtual = stocks.find(s => s.ticker === tx.ticker);
+      const qtyDisponivel = posAtual ? (Number(posAtual.qty) || 0) : 0;
+      // Se estiver editando, soma de volta a quantidade da venda antiga (que será revertida)
+      const oldTxEdit = txForm._editingId ? transactions.find(t => t.id === txForm._editingId) : null;
+      const qtyRevertida = (oldTxEdit && oldTxEdit.type === "VENDA" && oldTxEdit.ticker === tx.ticker)
+        ? (Number(oldTxEdit.qty) || 0) : 0;
+      const disponivelReal = qtyDisponivel + qtyRevertida;
+      if (tx.qty > disponivelReal + 0.0001) {
+        addToast(`Você tem ${disponivelReal} de ${tx.ticker}. Não é possível vender ${tx.qty}.`, "sell");
+        return;
+      }
+    }
+
     const editingId = txForm._editingId || null;
 
-    // Se estamos EDITANDO: monta a nova lista (sem a antiga, com a nova) e recalcula a posição do zero.
+    // Se estamos EDITANDO: reverte o efeito da transação ANTIGA e aplica o da NOVA.
+    // (Carteira é a verdade — ajustamos com base no que mudou, sem reconstruir do zero.)
     if (editingId) {
+      const oldTx = transactions.find(t => t.id === editingId);
       const newList = [tx, ...transactions.filter(t => t.id !== editingId)]
         .sort((a, b) => new Date(b.date) - new Date(a.date));
       setTransactions(newList);
-      recomputePositionFromTx(tx.ticker, newList);
+      setStocks(prev => prev.map(s => {
+        if (s.ticker !== tx.ticker && (!oldTx || s.ticker !== oldTx.ticker)) return s;
+        let pos = s;
+        // 1) reverte a transação antiga (se for desta ação)
+        if (oldTx && s.ticker === oldTx.ticker && oldTx.type !== "DIVIDENDO") {
+          pos = reverseTxOnPosition(pos, oldTx);
+        }
+        // 2) aplica a transação nova (se for desta ação)
+        if (s.ticker === tx.ticker && tx.type !== "DIVIDENDO") {
+          pos = applyTxToPosition(pos, tx);
+        }
+        return pos;
+      }));
       setShowTxForm(false);
       setTxForm({ ticker: "", type: "COMPRA", qty: "", total: "", date: new Date().toISOString().slice(0, 10), fees: "" });
-      addToast(`Transação de ${tx.ticker} atualizada e posição recalculada.`, "info");
+      addToast(`Transação de ${tx.ticker} atualizada e posição ajustada.`, "info");
       return;
     }
 
@@ -1459,43 +1492,88 @@ export default function App() {
   };
   // Recalcula a posição de uma ação do zero, a partir de uma lista de transações.
   // Usada ao editar ou apagar transações — garante consistência total.
-  const recomputePositionFromTx = (ticker, txList) => {
-    const txForTicker = txList
-      .filter(t => t.ticker === ticker)
-      .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
-    setStocks(prev => prev.map(s => {
-      if (s.ticker !== ticker) return s;
-      let qty = 0, totalCost = 0, realizedPL = 0;
-      for (const t of txForTicker) {
-        const tQty = Number(t.qty) || 0;
-        const tPrice = Number(t.price) || 0;
-        const tFees = Number(t.fees) || 0;
-        if (t.type === "COMPRA") {
-          totalCost += tQty * tPrice + tFees;
-          qty += tQty;
-        } else {
-          const avg = qty > 0 ? totalCost / qty : 0;
-          realizedPL += (tPrice - avg) * tQty - tFees;
-          const soldFraction = qty > 0 ? tQty / qty : 0;
-          totalCost = Math.max(0, totalCost * (1 - soldFraction));
-          qty = Math.max(0, qty - tQty);
-        }
-      }
-      const avgPrice = qty > 0 ? totalCost / qty : (Number(s.avgPrice) || 0);
-      return { ...s, qty, avgPrice: qty > 0 ? avgPrice : s.avgPrice, totalInvested: totalCost, realizedPL };
-    }));
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PRINCÍPIO: A CARTEIRA É A VERDADE. Cada transação apenas AJUSTA a posição.
+  // Nunca reconstruímos a carteira "do zero" a partir das transações (que podem
+  // estar incompletas). Em vez disso, aplicamos ou revertemos o efeito de UMA
+  // transação sobre a posição atual. Assim uma ação nunca some indevidamente.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Aplica o efeito de UMA transação sobre uma posição (retorna a nova posição).
+  const applyTxToPosition = (pos, t) => {
+    const tQty = Number(t.qty) || 0;
+    const tPrice = Number(t.price) || 0;
+    const tFees = Number(t.fees) || 0;
+    const qty = Number(pos.qty) || 0;
+    const avg = Number(pos.avgPrice) || 0;
+    const totalInv = Number(pos.totalInvested) || (qty * avg);
+    const realized = Number(pos.realizedPL) || 0;
+
+    if (t.type === "COMPRA") {
+      const newQty = qty + tQty;
+      const newTotalInv = totalInv + (tQty * tPrice + tFees);
+      const newAvg = newQty > 0 ? newTotalInv / newQty : avg;
+      return { ...pos, qty: newQty, avgPrice: newAvg, totalInvested: newTotalInv };
+    }
+    if (t.type === "VENDA") {
+      const newQty = Math.max(0, qty - tQty);
+      // lucro realizado usa o preço médio atual (só se houver custo válido)
+      const gain = avg > 0 ? (tPrice - avg) * tQty - tFees : 0;
+      const soldFraction = qty > 0 ? tQty / qty : 0;
+      const newTotalInv = Math.max(0, totalInv * (1 - soldFraction));
+      return { ...pos, qty: newQty, realizedPL: realized + gain,
+               totalInvested: newTotalInv, avgPrice: newQty > 0 ? avg : avg };
+    }
+    return pos; // DIVIDENDO não afeta a posição
   };
 
-  // Apagar uma transação: remove da lista E recalcula a posição da ação do zero.
+  // Reverte o efeito de UMA transação sobre uma posição (o "desfazer").
+  const reverseTxOnPosition = (pos, t) => {
+    const tQty = Number(t.qty) || 0;
+    const tPrice = Number(t.price) || 0;
+    const tFees = Number(t.fees) || 0;
+    const qty = Number(pos.qty) || 0;
+    const avg = Number(pos.avgPrice) || 0;
+    const totalInv = Number(pos.totalInvested) || (qty * avg);
+    const realized = Number(pos.realizedPL) || 0;
+
+    if (t.type === "COMPRA") {
+      // Desfazer uma compra: remove aquela quantidade e aquele custo da posição.
+      const newQty = Math.max(0, qty - tQty);
+      const custoDaCompra = tQty * tPrice + tFees;
+      const newTotalInv = Math.max(0, totalInv - custoDaCompra);
+      const newAvg = newQty > 0 ? newTotalInv / newQty : avg;
+      return { ...pos, qty: newQty, avgPrice: newAvg, totalInvested: newTotalInv };
+    }
+    if (t.type === "VENDA") {
+      // Desfazer uma venda: DEVOLVE aquela quantidade à posição e remove o lucro dela.
+      const newQty = qty + tQty;
+      const gainQueTinhaSido = avg > 0 ? (tPrice - avg) * tQty - tFees : 0;
+      // devolve o custo proporcional que tinha sido retirado
+      const custoDevolvido = avg > 0 ? avg * tQty : 0;
+      const newTotalInv = totalInv + custoDevolvido;
+      return { ...pos, qty: newQty, realizedPL: realized - gainQueTinhaSido,
+               totalInvested: newTotalInv };
+    }
+    return pos; // DIVIDENDO não afeta a posição
+  };
+
+  // Apagar uma transação: REVERTE o efeito dela na posição atual (não reconstrói do zero).
   const deleteTransaction = (id) => {
     const txToDelete = transactions.find(t => t.id === id);
     if (!txToDelete) return;
-    if (!window.confirm(`Apagar esta transação de ${txToDelete.type === "VENDA" ? "venda" : "compra"} de ${txToDelete.ticker}? A posição da ação será recalculada.`)) return;
-    const ticker = txToDelete.ticker;
-    const remaining = transactions.filter(t => t.id !== id);
-    setTransactions(remaining);
-    recomputePositionFromTx(ticker, remaining);
-    addToast(`Transação de ${ticker} apagada e posição recalculada.`, "info");
+    const tipoLabel = txToDelete.type === "VENDA" ? "venda" : txToDelete.type === "COMPRA" ? "compra" : "dividendo";
+    if (!window.confirm(`Apagar esta transação de ${tipoLabel} de ${txToDelete.ticker}? A posição será ajustada de acordo.`)) return;
+
+    setTransactions(prev => prev.filter(t => t.id !== id));
+
+    // Ajusta a posição revertendo só esta transação (dividendo não mexe na posição)
+    if (txToDelete.type !== "DIVIDENDO") {
+      setStocks(prev => prev.map(s =>
+        s.ticker === txToDelete.ticker ? reverseTxOnPosition(s, txToDelete) : s
+      ));
+    }
+    addToast(`Transação de ${txToDelete.ticker} apagada e posição ajustada.`, "info");
   };
 
   // ── Fluxo de dividendos (mensal e anual projetado) ──
@@ -1689,8 +1767,8 @@ export default function App() {
         {/* HEADER */}
         <div className="header">
           <div>
-            <div className="logo" style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <svg width="52" height="52" viewBox="0 0 130 130" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
+            <div className="logo" style={{ display: "flex", alignItems: "center", gap: 13 }}>
+              <svg width="50" height="50" viewBox="0 0 130 130" style={{ flexShrink: 0 }} xmlns="http://www.w3.org/2000/svg">
                 <defs>
                   <linearGradient id="seedisGrad" x1="0" y1="1" x2="1" y2="0">
                     <stop offset="0" stopColor="#16a34a"/>
@@ -1707,9 +1785,11 @@ export default function App() {
                 <path d="M76,54 C76,30 94,16 116,16 C116,40 98,54 76,54 Z" fill="url(#seedisLeaf)"/>
                 <path d="M76,68 C76,50 60,38 42,38 C42,56 58,68 76,68 Z" fill="#34d399"/>
               </svg>
-              <span style={{ fontWeight: 800, letterSpacing: "-0.5px", fontSize: "34px" }}>seedis</span>
+              <div style={{ display: "flex", flexDirection: "column", lineHeight: 1 }}>
+                <span style={{ fontWeight: 800, letterSpacing: "-0.5px", fontSize: "34px" }}>seedis</span>
+                <span style={{ fontSize: "13px", fontWeight: 700, letterSpacing: "2.2px", color: "#8aa596", marginTop: "5px" }}>INVISTA &amp; CRESÇA</span>
+              </div>
             </div>
-            <div className="sub">Invista &amp; Cresça</div>
           </div>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             {/* aviso discreto só quando notificações bloqueadas */}
@@ -2349,6 +2429,17 @@ export default function App() {
                 Veja dados de mercado e notícias de qualquer ação para estudar antes de investir. Se gostar, pode adicionar à sua lista de observação.
               </div>
             </div>
+          {/* O botão de "Adicionar à Observação" para uma ação pesquisada NÃO deve depender
+              da análise por IA (que não funciona sem servidor). Mostramos ele sempre que há
+              uma pesquisa pendente, independente de selAnalysis ter vindo ou não. */}
+          {researchStock && researchStock.ticker === selectedStock && !stocks.find(s => s.ticker === selectedStock) && (
+            <div className="card" style={{ marginBottom: 16, borderColor: "#22d3ee", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+              <div style={{ fontSize: 13, color: "#cbd5e1" }}>
+                <strong>{researchStock.ticker}</strong> — {researchStock.name} <span style={{ color: "#7c8aa5" }}>(pesquisa, não está na sua carteira)</span>
+              </div>
+              <button className="btn btn-primary btn-sm" onClick={addResearchToWatchlist}><Icon name="eye" size={14} /> Adicionar à Observação</button>
+            </div>
+          )}
           {(
           !selectedStock || !selAnalysis ? (
             <div className="empty">
@@ -2366,15 +2457,6 @@ export default function App() {
             </div>
           ) : (
             <div>
-              {/* Se a ação pesquisada NÃO está na carteira, oferece adicionar à observação */}
-              {researchStock && researchStock.ticker === selectedStock && !stocks.find(s => s.ticker === selectedStock) && (
-                <div className="card" style={{ marginBottom: 16, borderColor: "#22d3ee", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-                  <div style={{ fontSize: 13, color: "#cbd5e1" }}>
-                    <strong>{researchStock.ticker}</strong> — {researchStock.name} <span style={{ color: "#7c8aa5" }}>(pesquisa, não está na sua carteira)</span>
-                  </div>
-                  <button className="btn btn-primary btn-sm" onClick={addResearchToWatchlist}><Icon name="eye" size={14} /> Adicionar à Observação</button>
-                </div>
-              )}
               <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
                 {[...stocks].sort((a, b) => a.ticker.localeCompare(b.ticker)).map(s => (
                   <button key={s.id} className={`btn btn-sm ${selectedStock === s.ticker ? "btn-primary" : "btn-ghost"}`}
@@ -2955,6 +3037,11 @@ export default function App() {
         <div className="form-overlay" onClick={e => e.target === e.currentTarget && setShowForm(false)}>
           <div className="form-box">
             <div className="form-title">{editId ? "Editar Ação" : "Adicionar Nova Ação"}</div>
+            <div style={{ fontSize: 12.5, color: "#8aa596", marginTop: -6, marginBottom: 14, lineHeight: 1.4 }}>
+              {editId
+                ? "Aqui você edita a ficha da ação (dados e posição atual). Para registrar aportes ou vendas, use a aba Transações."
+                : "Cadastre aqui a posição que você já tem (quantidade e preço médio atuais) e os dados da ação. Depois, use a aba Transações para lançar novos aportes e vendas."}
+            </div>
             <div className="form-grid">
               {/* Ticker + Name */}
               <div className="form-group form-full">
@@ -3092,6 +3179,11 @@ export default function App() {
                   style={{ opacity: form.paysDividends !== "sim" ? 0.4 : 1 }}
                   value={form.dividendYield}
                   onChange={e => setForm(p => ({ ...p, dividendYield: e.target.value }))} />
+                {form.paysDividends === "sim" && (
+                  <div className="form-hint" style={{ color: "#fbbf24", marginTop: 4 }}>
+                    Se preenchido automaticamente, o yield é uma estimativa — confirme o valor na sua corretora.
+                  </div>
+                )}
               </div>
               {/* Dividend frequency (data de pagamento removida a pedido) */}
               <div className="form-group">
@@ -3189,6 +3281,9 @@ export default function App() {
         <div className="form-overlay" onClick={e => e.target === e.currentTarget && setShowTxForm(false)}>
           <div className="form-box">
             <div className="form-title">Registrar Transação</div>
+            <div style={{ fontSize: 12.5, color: "#8aa596", marginTop: -6, marginBottom: 14, lineHeight: 1.4 }}>
+              Registre aqui aportes (novas compras), vendas e dividendos. O preço médio, a quantidade e o valor investido da ação são atualizados automaticamente.
+            </div>
             <div className="form-grid">
               <div className="form-group form-full">
                 <label className="form-label">Tipo</label>
